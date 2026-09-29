@@ -1,14 +1,69 @@
 /* global window */
 
-const MENCTOR_SUPABASE_URL = "https://jrsetvnjuqmwvuietizw.supabase.co";
-const MENCTOR_SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Impyc2V0dm5qdXFtd3Z1aWV0aXp3Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODMwOTk0NzMsImV4cCI6MjA5ODY3NTQ3M30.Pn7f1kKeqcV9DzQMzMbjgM0tLtXfjgN3_QPMBCoKFCI";
+// =====================================================
+// MenctorDB — cliente HTTP exclusivo para o backend
+// Quarkus + PostgreSQL (porta 5000 em dev)
+// =====================================================
 
-const pipelineHeaders = {
-  apikey: MENCTOR_SUPABASE_KEY,
-  Authorization: `Bearer ${MENCTOR_SUPABASE_KEY}`,
-  "Content-Type": "application/json",
+const getApiBase = () => {
+  if (typeof window !== "undefined") {
+    if (window.MENCTOR_API_URL) return window.MENCTOR_API_URL.replace(/\/$/, "");
+    try {
+      const stored = window.localStorage?.getItem("MENCTOR_API_URL");
+      if (stored) return stored.replace(/\/$/, "");
+    } catch (e) {}
+    if (window.location && window.location.port === "3000") {
+      return "http://localhost:5000";
+    }
+    return "";
+  }
+  return "http://localhost:5000";
 };
 
+const apiFetch = async (path, options = {}) => {
+  const base = getApiBase();
+  const url = `${base}/api/${path.replace(/^\//, "")}`;
+  const response = await fetch(url, {
+    ...options,
+    headers: {
+      "Content-Type": "application/json",
+      ...(options.headers || {}),
+    },
+  });
+  if (!response.ok) {
+    let errorMsg = `Erro na requisição ${response.status}`;
+    try {
+      const json = await response.json();
+      errorMsg = json.error || json.message || errorMsg;
+    } catch (e) {
+      try {
+        const text = await response.text();
+        if (text) errorMsg = text;
+      } catch (_) {}
+    }
+    const error = new Error(errorMsg);
+    error.status = response.status;
+    throw error;
+  }
+  if (response.status === 204) return null;
+  return response.json();
+};
+
+// Busca de um registro: "não encontrado" (404) devolve null em vez de erro.
+const apiFetchOrNull = async (path) => {
+  try {
+    return await apiFetch(path);
+  } catch (err) {
+    if (err.status === 404) return null;
+    throw err;
+  }
+};
+
+// =====================================================
+// PIPELINE
+// =====================================================
+
+// Colunas de pipeline_cards; o pipeline.jsx usa valor, proximoPasso, decisor, probabilidade e assinado.
 const toDbCard = (card, stage) => ({
   id: card.id,
   stage,
@@ -16,65 +71,51 @@ const toDbCard = (card, stage) => ({
   contato: card.contato || "",
   email: card.email || "",
   funcionarios: Number(card.funcionarios || card.colaboradores || 0),
-  valor: Number(card.valor || 0),
+  valor: Number(card.valor ?? card.mrr ?? card.ticket ?? 0),
   dias: Number(card.dias || 0),
   decisor: card.decisor || card.contato || "",
   proximo_passo: card.proximoPasso || "",
-  probabilidade: Number(card.probabilidade || 35),
+  probabilidade: Number(card.probabilidade ?? 35),
   origem: card.origem || "",
   extra: {
-    assinado: !!card.assinado,
-    etapaManual: !!card.etapaManual,
+    ...(card.extra || {}),
+    assinado: !!(card.assinado ?? card.extra?.assinado),
+    etapaManual: !!(card.etapaManual ?? card.extra?.etapaManual),
   },
 });
 
 const toAppCard = (row) => ({
   id: row.id,
+  stage: row.stage,
   empresa: row.empresa,
   contato: row.contato,
   email: row.email,
   funcionarios: row.funcionarios,
+  colaboradores: row.funcionarios,
   valor: row.valor,
+  mrr: row.valor,
   dias: row.dias,
   decisor: row.decisor,
   proximoPasso: row.proximo_passo,
   probabilidade: row.probabilidade,
   origem: row.origem,
-  stage: row.stage,
   assinado: !!row.extra?.assinado,
   etapaManual: !!row.extra?.etapaManual,
+  extra: row.extra || {},
 });
-
-const supabaseRequest = async (path, options = {}) => {
-  const response = await fetch(`${MENCTOR_SUPABASE_URL}/rest/v1/${path}`, {
-    ...options,
-    headers: {
-      ...pipelineHeaders,
-      ...(options.headers || {}),
-    },
-  });
-  const text = await response.text();
-  const payload = text ? JSON.parse(text) : null;
-  if (!response.ok) {
-    const message = payload?.message || payload?.error || "Falha ao acessar Supabase.";
-    throw new Error(message);
-  }
-  return payload;
-};
 
 const MenctorDB = {
   async listPipelineCards() {
-    const rows = await supabaseRequest("pipeline_cards?select=*&order=updated_at.desc");
-    return rows.map(toAppCard);
+    const rows = await apiFetch("pipeline");
+    return (rows || []).map(toAppCard);
   },
 
   async upsertPipelineCard(card, stage = card.stage || "lead") {
-    const rows = await supabaseRequest("pipeline_cards?on_conflict=id", {
+    const saved = await apiFetch("pipeline", {
       method: "POST",
-      headers: { Prefer: "resolution=merge-duplicates,return=representation" },
       body: JSON.stringify(toDbCard(card, stage)),
     });
-    return rows?.[0] ? toAppCard(rows[0]) : null;
+    return saved ? toAppCard(saved) : null;
   },
 
   async updatePipelineStage(card, stage, patch = {}) {
@@ -88,34 +129,25 @@ const MenctorDB = {
 // =====================================================
 
 MenctorDB.listClients = async () => {
-  const rows = await supabaseRequest("clients?select=*&order=updated_at.desc");
-  return rows;
+  return await apiFetch("clientes");
 };
 
 MenctorDB.getClient = async (id) => {
-  const [client] = await supabaseRequest(`clients?id=eq.${id}&select=*`);
+  const client = await apiFetchOrNull(`clientes/${encodeURIComponent(id)}`);
   if (!client) return null;
 
-  const [progressRows, cadastroRows] = await Promise.all([
-    supabaseRequest(`client_step_progress?client_id=eq.${id}&select=*&order=step_number`),
-    supabaseRequest(`cadastro_responses?client_id=eq.${id}&select=*`),
-  ]);
-
-  // Build shape compatible with old ETAPAS_CLIENTE
   const status = {};
-  (progressRows || []).forEach(p => {
-    status[p.step_number] = { status: p.status, ... (p.data || {}) };
+  (client.progress || []).forEach(p => {
+    status[p.step_number] = { status: p.status, ...(p.data || {}) };
   });
 
   const etapaAtual = client.current_step || 1;
-
-  const loadedCadastro = toCamelCadastro(cadastroRows?.[0] || null);
+  const loadedCadastro = toCamelCadastro(client.cadastro || null);
 
   return {
     ...client,
-    progress: progressRows || [],
+    progress: client.progress || [],
     cadastro: loadedCadastro,
-    // for roadmap compatibility
     etapas: {
       etapaAtual,
       status,
@@ -137,56 +169,24 @@ MenctorDB.createClient = async (data = {}) => {
     ...data,
   };
 
-  const [client] = await supabaseRequest("clients", {
+  return await apiFetch("clientes", {
     method: "POST",
-    headers: { Prefer: "return=representation" },
     body: JSON.stringify(payload),
   });
-
-  // Create 7 step progress rows
-  const stepRows = [1,2,3,4,5,6,7].map(n => ({
-    client_id: client.id,
-    step_number: n,
-    status: n === 1 ? "em_andamento" : "pendente",
-  }));
-
-  await supabaseRequest("client_step_progress", {
-    method: "POST",
-    body: JSON.stringify(stepRows),
-  });
-
-  return client;
 };
 
 MenctorDB.updateClient = async (id, patch = {}) => {
-  const [row] = await supabaseRequest(`clients?id=eq.${id}`, {
+  return await apiFetch(`clientes/${encodeURIComponent(id)}`, {
     method: "PATCH",
-    headers: { Prefer: "return=representation" },
-    body: JSON.stringify({ ...patch, updated_at: new Date().toISOString() }),
+    body: JSON.stringify(patch),
   });
-  return row;
 };
 
 MenctorDB.saveStepProgress = async (clientId, stepNumber, status, extraData = {}) => {
-  const payload = {
-    client_id: clientId,
-    step_number: stepNumber,
-    status,
-    data: extraData,
-  };
-
-  const [row] = await supabaseRequest("client_step_progress?on_conflict=client_id,step_number", {
-    method: "POST",
-    headers: { Prefer: "resolution=merge-duplicates,return=representation" },
-    body: JSON.stringify(payload),
+  return await apiFetch(`clientes/${encodeURIComponent(clientId)}/etapas/${stepNumber}`, {
+    method: "PUT",
+    body: JSON.stringify({ status, data: extraData }),
   });
-
-  // If completing or starting a step, update current on client
-  if (status === "concluida" || status === "em_andamento") {
-    await MenctorDB.updateClient(clientId, { current_step: stepNumber });
-  }
-
-  return row;
 };
 
 // Helper to convert camelCase form to snake_case for DB
@@ -266,21 +266,16 @@ const toCamelCadastro = (row) => {
 
 MenctorDB.saveCadastro = async (clientId, formData) => {
   const payload = toSnakeCadastro({ client_id: clientId, ...formData });
-
-  const [cad] = await supabaseRequest("cadastro_responses?on_conflict=client_id", {
-    method: "POST",
-    headers: { Prefer: "resolution=merge-duplicates,return=representation" },
+  const cad = await apiFetch(`clientes/${encodeURIComponent(clientId)}/cadastro`, {
+    method: "PUT",
     body: JSON.stringify(payload),
   });
-
-  // Mark step 1 as completed, pass original camel for compatibility
   await MenctorDB.saveStepProgress(clientId, 1, "concluida", formData);
-
   return cad;
 };
 
 MenctorDB.listSteps = async () => {
-  return supabaseRequest("steps?select=*&order=number");
+  return await apiFetch("clientes/etapas");
 };
 
 // =====================================================
@@ -290,11 +285,11 @@ MenctorDB.listSteps = async () => {
 const toDbDenuncia = (d) => ({
   id: d.id,
   protocolo: d.protocolo,
-  cliente_id: d.clienteId,
+  cliente_id: d.clienteId || d.cliente_id,
   data: d.data,
   status: d.status || "triagem",
   gravidade: d.gravidade || null,
-  tipo_id: d.tipoId || null,
+  tipo_id: d.tipoId || d.tipo_id || null,
   natureza: d.natureza || null,
   anonimo: d.anonimo !== false,
   denunciante: d.denunciante || null,
@@ -302,13 +297,13 @@ const toDbDenuncia = (d) => ({
   relato: d.relato || "",
   evidencias: d.evidencias || [],
   admissibilidade: d.admissibilidade || null,
-  prazo_final: d.prazoFinal || null,
+  prazo_final: d.prazoFinal || d.prazo_final || null,
   parecer: d.parecer || null,
   resultado: d.resultado || null,
   recomendacoes: d.recomendacoes || null,
   andamentos: d.andamentos || [],
   mensagens: d.mensagens || [],
-  audit_log: d.auditLog || [],
+  audit_log: d.auditLog || d.audit_log || [],
 });
 
 const toAppDenuncia = (row) => ({
@@ -336,27 +331,347 @@ const toAppDenuncia = (row) => ({
 });
 
 MenctorDB.listDenuncias = async () => {
-  const rows = await supabaseRequest("denuncias?select=*&order=data.desc");
-  return rows.map(toAppDenuncia);
+  const rows = await apiFetch("denuncias");
+  return (rows || []).map(toAppDenuncia);
 };
 
 MenctorDB.getDenuncia = async (id) => {
-  const rows = await supabaseRequest(`denuncias?id=eq.${encodeURIComponent(id)}&select=*`);
-  return rows?.[0] ? toAppDenuncia(rows[0]) : null;
+  const row = await apiFetchOrNull(`denuncias/${encodeURIComponent(id)}`);
+  return row ? toAppDenuncia(row) : null;
 };
 
 MenctorDB.getDenunciaByProtocolo = async (protocolo) => {
-  const rows = await supabaseRequest(`denuncias?protocolo=eq.${encodeURIComponent(protocolo)}&select=*`);
-  return rows?.[0] ? toAppDenuncia(rows[0]) : null;
+  const row = await apiFetchOrNull(`denuncias/protocolo/${encodeURIComponent(protocolo)}`);
+  return row ? toAppDenuncia(row) : null;
 };
 
 MenctorDB.upsertDenuncia = async (denuncia) => {
-  const rows = await supabaseRequest("denuncias?on_conflict=id", {
+  const row = await apiFetch("denuncias", {
     method: "POST",
-    headers: { Prefer: "resolution=merge-duplicates,return=representation" },
     body: JSON.stringify(toDbDenuncia(denuncia)),
   });
-  return rows?.[0] ? toAppDenuncia(rows[0]) : null;
+  return row ? toAppDenuncia(row) : null;
+};
+
+// =====================================================
+// CAMPANHAS & RESPOSTAS (PostgreSQL / Quarkus)
+// =====================================================
+
+const toDbCampanha = (c) => ({
+  id: c.id,
+  cliente_id: c.clienteId || c.cliente_id || null,
+  titulo: c.titulo,
+  descricao: c.descricao || "",
+  diagnostico_id: c.diagnosticoId || c.diagnostico_id || "copsoq",
+  instrumento: c.instrumento || "COPSOQ",
+  ciclo: c.ciclo || "2026-Q1",
+  reavaliacao: c.reavaliacao || "90 dias",
+  data_inicial: c.dataInicial || c.data_inicial || null,
+  data_final: c.dataFinal || c.data_final || null,
+  quantidade_funcionarios: Number(c.quantidadeFuncionarios || c.quantidade_funcionarios || 0),
+  status: c.status || "ativa",
+  link_token: c.linkToken || c.link_token || null,
+  extra: {
+    ...(c.extra || {}),
+    ...(c.numEventosPresenciais !== undefined ? { numEventosPresenciais: Number(c.numEventosPresenciais) } : {}),
+    ...(c.agenda !== undefined ? { agenda: c.agenda } : {}),
+  },
+});
+
+const toAppCampanha = (row) => ({
+  id: row.id,
+  clienteId: row.cliente_id,
+  titulo: row.titulo,
+  descricao: row.descricao,
+  diagnosticoId: row.diagnostico_id,
+  instrumento: row.instrumento,
+  ciclo: row.ciclo,
+  reavaliacao: row.reavaliacao,
+  dataInicial: row.data_inicial,
+  dataFinal: row.data_final,
+  quantidadeFuncionarios: row.quantidade_funcionarios,
+  numEventosPresenciais: row.extra?.numEventosPresenciais ?? row.quantidade_funcionarios,
+  agenda: row.extra?.agenda || "",
+  status: row.status,
+  linkToken: row.link_token,
+  createdAt: row.created_at,
+  updatedAt: row.updated_at,
+  extra: row.extra || {},
+});
+
+MenctorDB.listCampanhas = async (clienteId = "") => {
+  try {
+    const query = clienteId ? `campanhas?clienteId=${encodeURIComponent(clienteId)}` : "campanhas";
+    const rows = await apiFetch(query);
+    return (rows || []).map(toAppCampanha);
+  } catch (err) {
+    console.warn("Erro ao listar campanhas:", err);
+    return (window.CAMPANHAS || []).filter(c => !clienteId || c.clienteId === clienteId);
+  }
+};
+
+MenctorDB.getCampanha = async (id) => {
+  try {
+    const row = await apiFetch(`campanhas/${encodeURIComponent(id)}`);
+    return row ? toAppCampanha(row) : null;
+  } catch (err) {
+    return (window.CAMPANHAS || []).find(c => c.id === id) || null;
+  }
+};
+
+MenctorDB.upsertCampanha = async (campanha) => {
+  try {
+    const row = await apiFetch("campanhas", {
+      method: "POST",
+      body: JSON.stringify(toDbCampanha(campanha)),
+    });
+    return row ? toAppCampanha(row) : null;
+  } catch (err) {
+    console.warn("Erro ao salvar campanha:", err);
+    return campanha;
+  }
+};
+
+MenctorDB.updateCampanhaStatus = async (id, status) => {
+  try {
+    const row = await apiFetch(`campanhas/${encodeURIComponent(id)}/status`, {
+      method: "PATCH",
+      body: JSON.stringify({ status }),
+    });
+    return row ? toAppCampanha(row) : null;
+  } catch (err) {
+    return null;
+  }
+};
+
+MenctorDB.deleteCampanha = async (id) => {
+  try {
+    await apiFetch(`campanhas/${encodeURIComponent(id)}`, { method: "DELETE" });
+    return true;
+  } catch (err) {
+    return false;
+  }
+};
+
+MenctorDB.submeterRespostaCampanha = async (campanhaId, payload) => {
+  try {
+    return await apiFetch(`campanhas/${encodeURIComponent(campanhaId)}/respostas`, {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+  } catch (err) {
+    console.warn("Erro ao registrar resposta:", err);
+    if (window.registrarRespostaCampanha) {
+      window.registrarRespostaCampanha({ id: campanhaId }, payload);
+    }
+    return payload;
+  }
+};
+
+MenctorDB.listRespostasCampanha = async (campanhaId) => {
+  try {
+    return await apiFetch(`campanhas/${encodeURIComponent(campanhaId)}/respostas`);
+  } catch (err) {
+    if (window.getCampanhaRespostas) return window.getCampanhaRespostas(campanhaId);
+    return [];
+  }
+};
+
+MenctorDB.getResultadoCampanha = async (campanhaId) => {
+  try {
+    return await apiFetch(`campanhas/${encodeURIComponent(campanhaId)}/resultado`);
+  } catch (err) {
+    if (window.getCampanhaResultado) return window.getCampanhaResultado({ id: campanhaId });
+    return { total: 0, media: null, porDimensao: [], porSetor: [] };
+  }
+};
+
+MenctorDB.jaRespondeuCampanha = async (campanhaId, cpfHash) => {
+  try {
+    const res = await apiFetch(`campanhas/${encodeURIComponent(campanhaId)}/ja-respondeu?cpfHash=${encodeURIComponent(cpfHash)}`);
+    return !!res?.jaRespondeu;
+  } catch (err) {
+    if (window.jaRespondeuCampanha) return window.jaRespondeuCampanha(campanhaId, cpfHash);
+    return false;
+  }
+};
+
+// =====================================================
+// INSTRUMENTOS & QUESTIONÁRIOS (PostgreSQL / Quarkus)
+// =====================================================
+
+MenctorDB.listInstrumentos = async () => {
+  try {
+    return await apiFetch("instrumentos");
+  } catch (err) {
+    console.warn("Erro ao listar instrumentos:", err);
+    return window.DIAGNOSTICOS || [];
+  }
+};
+
+MenctorDB.getInstrumento = async (id) => {
+  try {
+    return await apiFetch(`instrumentos/${encodeURIComponent(id)}`);
+  } catch (err) {
+    console.warn("Erro ao obter instrumento:", err);
+    return null;
+  }
+};
+
+// =====================================================
+// ESTRUTURA ORGANIZACIONAL (PostgreSQL / Quarkus)
+// =====================================================
+
+MenctorDB.organizacao = {
+  resumo: async (clienteId) => {
+    return await apiFetch(`clientes/${encodeURIComponent(clienteId)}/organizacao`);
+  },
+  listar: async (clienteId, categoria, apenasAtivos = false) => {
+    const q = apenasAtivos ? "?apenasAtivos=true" : "";
+    return await apiFetch(`clientes/${encodeURIComponent(clienteId)}/organizacao/${encodeURIComponent(categoria)}${q}`);
+  },
+  obter: async (clienteId, categoria, id) => {
+    return await apiFetch(`clientes/${encodeURIComponent(clienteId)}/organizacao/${encodeURIComponent(categoria)}/${encodeURIComponent(id)}`);
+  },
+  criar: async (clienteId, categoria, dados) => {
+    return await apiFetch(`clientes/${encodeURIComponent(clienteId)}/organizacao/${encodeURIComponent(categoria)}`, {
+      method: "POST",
+      body: JSON.stringify(dados),
+    });
+  },
+  atualizar: async (clienteId, categoria, id, dados) => {
+    return await apiFetch(`clientes/${encodeURIComponent(clienteId)}/organizacao/${encodeURIComponent(categoria)}/${encodeURIComponent(id)}`, {
+      method: "PUT",
+      body: JSON.stringify(dados),
+    });
+  },
+  alternarAtivo: async (clienteId, categoria, id) => {
+    return await apiFetch(`clientes/${encodeURIComponent(clienteId)}/organizacao/${encodeURIComponent(categoria)}/${encodeURIComponent(id)}/toggle`, {
+      method: "PATCH",
+    });
+  },
+  excluir: async (clienteId, categoria, id) => {
+    return await apiFetch(`clientes/${encodeURIComponent(clienteId)}/organizacao/${encodeURIComponent(categoria)}/${encodeURIComponent(id)}`, {
+      method: "DELETE",
+    });
+  },
+};
+
+// =====================================================
+// MATRIZ DE RISCO PGR (PostgreSQL / Quarkus)
+// =====================================================
+
+MenctorDB.matriz = {
+  obter: async (clienteId) => {
+    return await apiFetch(`clientes/${encodeURIComponent(clienteId)}/matriz`);
+  },
+  listarVersoes: async (clienteId) => {
+    try {
+      return await apiFetch(`clientes/${encodeURIComponent(clienteId)}/matriz/versoes`);
+    } catch (err) {
+      return window.MATRIZES_VERSOES?.[clienteId] || [];
+    }
+  },
+  obterVersao: async (clienteId, versaoId) => {
+    return await apiFetch(`clientes/${encodeURIComponent(clienteId)}/matriz/versoes/${encodeURIComponent(versaoId)}`);
+  },
+  criarVersao: async (clienteId, dados) => {
+    return await apiFetch(`clientes/${encodeURIComponent(clienteId)}/matriz/versoes`, {
+      method: "POST",
+      body: JSON.stringify(dados),
+    });
+  },
+  atualizarVersao: async (clienteId, versaoId, dados) => {
+    return await apiFetch(`clientes/${encodeURIComponent(clienteId)}/matriz/versoes/${encodeURIComponent(versaoId)}`, {
+      method: "PUT",
+      body: JSON.stringify(dados),
+    });
+  },
+  publicarVersao: async (clienteId, versaoId) => {
+    return await apiFetch(`clientes/${encodeURIComponent(clienteId)}/matriz/versoes/${encodeURIComponent(versaoId)}/publicar`, {
+      method: "POST",
+    });
+  },
+  calcular: async (clienteId, probabilidade, severidade) => {
+    try {
+      return await apiFetch(`clientes/${encodeURIComponent(clienteId)}/matriz/calcular?probabilidade=${probabilidade}&severidade=${severidade}`);
+    } catch (err) {
+      return null;
+    }
+  },
+};
+
+// =====================================================
+// MOTOR DE SCORING PSICOSSOCIAL (Quarkus / PostgreSQL)
+// =====================================================
+MenctorDB.scoring = {
+  getCampanhaScoring: async (campanhaId) => {
+    return await apiFetch(`campanhas/${encodeURIComponent(campanhaId)}/scoring`);
+  },
+  recalcularCampanhaScoring: async (campanhaId) => {
+    return await apiFetch(`campanhas/${encodeURIComponent(campanhaId)}/scoring/recalcular`, {
+      method: "POST",
+    });
+  },
+  getCampanhaScoringDimensoes: async (campanhaId) => {
+    return await apiFetch(`campanhas/${encodeURIComponent(campanhaId)}/scoring/dimensoes`);
+  },
+  getCampanhaScoringRecortes: async (campanhaId) => {
+    return await apiFetch(`campanhas/${encodeURIComponent(campanhaId)}/scoring/recortes`);
+  },
+  getHistoricoCliente: async (clienteId) => {
+    return await apiFetch(`clientes/${encodeURIComponent(clienteId)}/scoring/historico`);
+  },
+};
+
+// =====================================================
+// MOTOR DE PLANO DE AÇÃO PSICOSSOCIAL (Quarkus / PostgreSQL)
+// =====================================================
+MenctorDB.planoAcao = {
+  get: async (campanhaId) => {
+    return await apiFetch(`campanhas/${encodeURIComponent(campanhaId)}/plano-acao`);
+  },
+  gerar: async (campanhaId, regenerar = false) => {
+    const url = regenerar
+      ? `campanhas/${encodeURIComponent(campanhaId)}/plano-acao/gerar?regenerar=true`
+      : `campanhas/${encodeURIComponent(campanhaId)}/plano-acao/gerar`;
+    return await apiFetch(url, { method: "POST" });
+  },
+  regenerar: async (campanhaId) => {
+    return await apiFetch(`campanhas/${encodeURIComponent(campanhaId)}/plano-acao/regenerar`, {
+      method: "POST",
+    });
+  },
+  getResumo: async (campanhaId) => {
+    return await apiFetch(`campanhas/${encodeURIComponent(campanhaId)}/plano-acao/resumo`);
+  },
+  atualizarAcao: async (campanhaId, acaoId, dados) => {
+    return await apiFetch(`campanhas/${encodeURIComponent(campanhaId)}/plano-acao/acoes/${encodeURIComponent(acaoId)}`, {
+      method: "PUT",
+      body: JSON.stringify(dados),
+    });
+  },
+  alterarStatus: async (campanhaId, acaoId, status, motivo = null, usuario = "sistema") => {
+    return await apiFetch(`campanhas/${encodeURIComponent(campanhaId)}/plano-acao/acoes/${encodeURIComponent(acaoId)}/status`, {
+      method: "PATCH",
+      body: JSON.stringify({ status, motivo, usuario }),
+    });
+  },
+  criarAcao: async (campanhaId, dados) => {
+    return await apiFetch(`campanhas/${encodeURIComponent(campanhaId)}/plano-acao/acoes`, {
+      method: "POST",
+      body: JSON.stringify(dados),
+    });
+  },
+  excluirAcao: async (campanhaId, acaoId, motivo = null) => {
+    const query = motivo ? `?motivo=${encodeURIComponent(motivo)}` : "";
+    return await apiFetch(`campanhas/${encodeURIComponent(campanhaId)}/plano-acao/acoes/${encodeURIComponent(acaoId)}${query}`, {
+      method: "DELETE",
+    });
+  },
+  getHistorico: async (campanhaId, acaoId) => {
+    return await apiFetch(`campanhas/${encodeURIComponent(campanhaId)}/plano-acao/acoes/${encodeURIComponent(acaoId)}/historico`);
+  },
 };
 
 Object.assign(window, { MenctorDB });

@@ -1,9 +1,9 @@
-/* global React, Icon, Page, CLIENTES, CLIENTE_ETAPAS, ETAPAS_CLIENTE, PortalPropostaScreen, PortalContratoScreen, RiskMedallion, getDiagnosticoResultadoMock, ENTREVISTA_ESTRUTURAS, ENTREVISTA_FATORES, ENTREVISTA_MATURIDADE, CLASSIFICACAO_LABELS, CLASSIFICACAO_CORES, ENTREVISTAS_MOCK, criarParticipantesEntrevista, getEntrevistaParticipantes, agregarFatoresEntrevista, calcularProgressoEntrevista, calcularMaturidadeEntrevista */
+/* global React, ReactDOM, Icon, Page, CLIENTES, CLIENTE_ETAPAS, ETAPAS_CLIENTE, EstruturaOrganizacionalEtapa, PortalPropostaScreen, PortalContratoScreen, RiskMedallion, getDiagnosticoResultadoMock, ENTREVISTA_ESTRUTURAS, ENTREVISTA_FATORES, ENTREVISTA_MATURIDADE, CLASSIFICACAO_LABELS, CLASSIFICACAO_CORES, ENTREVISTAS_MOCK, criarParticipantesEntrevista, getEntrevistaParticipantes, agregarFatoresEntrevista, calcularProgressoEntrevista, calcularMaturidadeEntrevista, INDICADORES_CLIENTE, INDICADORES_CLASSIFICACAO, classificarIndicador, CAMPANHAS, DIAGNOSTICOS, CampanhaRow, NovaCampanhaModal, LinkCampanhaModal, getCampanhaRespondidos, getCampanhaStatusEfetivo, MatrizRiscoScreen */
 const { useState, useEffect, useRef, useMemo } = React;
 
 // ════════════════════════════════════════════════════════════
-// ETAPAS DO CLIENTE — 8 etapas (com Entrevistas integrada na Etapa 6)
-// Cadastro • Proposta • Contrato • Sensibilização • Diagnóstico • Entrevistas • Relatórios • Apresentação
+// ETAPAS DO CLIENTE — 9 etapas (com Entrevistas integrada na Etapa 7)
+// Cadastro • Estrutura Organizacional • Matriz de risco • Sensibilização • Indicadores • Diagnóstico • Entrevistas • Relatórios • Apresentação
 // Seguindo boas práticas de UX: labels visíveis, agrupamento, progresso claro, cards, estados desabilitados, feedback
 // ════════════════════════════════════════════════════════════
 
@@ -50,6 +50,7 @@ const RoadmapScreen = ({ navigate, params = {} }) => {
 
   const [clienteId, setClienteId] = useState(initialId);
   const [dbLoaded, setDbLoaded] = useState(null);
+  const [dbRespondeu, setDbRespondeu] = useState(null); // id do último cliente que o banco respondeu (achou ou não)
 
   useEffect(() => {
     let mounted = true;
@@ -60,17 +61,34 @@ const RoadmapScreen = ({ navigate, params = {} }) => {
           if (full.etapas) {
             if (!window.ETAPAS_CLIENTE) window.ETAPAS_CLIENTE = {};
             window.ETAPAS_CLIENTE[clienteId] = full.etapas;
+            // o progresso salvo no banco passa a valer na tela (o estado local nasce antes da resposta)
+            if (Object.keys(full.etapas.status || {}).length) {
+              setEtapasState(prev => ({ ...prev, [clienteId]: full.etapas }));
+            }
           }
         }
-      });
+      }).catch(err => console.warn("[Menctor] Cliente não carregado do banco:", err.message))
+        .finally(() => { if (mounted) setDbRespondeu(clienteId); });
     }
     return () => { mounted = false; };
   }, [clienteId, isNovoFlow]);
 
+  // Seletor de cliente com os clientes do banco (os mesmos da tela Clientes); sem backend, os de demonstração
+  const [clientesBanco, setClientesBanco] = useState(null);
+  useEffect(() => {
+    let mounted = true;
+    if (!isNovoFlow && typeof window.MenctorDB?.listClients === "function") {
+      window.MenctorDB.listClients()
+        .then(lista => { if (mounted && Array.isArray(lista) && lista.length) setClientesBanco(lista); })
+        .catch(err => console.warn("[Menctor] Lista de clientes não carregada do banco:", err.message));
+    }
+    return () => { mounted = false; };
+  }, [isNovoFlow]);
+
   const etapas = window.CLIENTE_ETAPAS || [];
   const totalEtapas = etapas.length || 8;
 
-  // Respeita ?etapa=1 da URL (usado ao clicar em cards para abrir direto no cadastro)
+  // Respeita ?etapa=N da URL (ao clicar em um card na tela Clientes, abre na etapa 2 — Estrutura Organizacional)
   const forcedEtapa = params.etapa ? parseInt(params.etapa, 10) : null;
 
   const [etapaSel, setEtapaSel] = useState(() => {
@@ -98,10 +116,19 @@ const RoadmapScreen = ({ navigate, params = {} }) => {
   });
 
   const ativos = (window.CLIENTES || []).filter(c => c.status === "ativo" || c.status === "negociacao");
-  // Para fluxo novo: usa o draft local enquanto não foi salvo
-  const cliente = dbLoaded || (isNovoFlow && novoDraft)
-    ? (novoDraft || dbLoaded)
-    : (ativos.find(c => c.id === clienteId) || (window.CLIENTES || []).find(c => c.id === clienteId) || ativos[0]);
+  // Só vale o que o banco devolveu para o cliente atual (o seletor pode ter trocado de cliente)
+  const dbCliente = dbLoaded && dbLoaded.id === clienteId ? dbLoaded : null;
+  const clienteMock = ativos.find(c => c.id === clienteId) || (window.CLIENTES || []).find(c => c.id === clienteId);
+  // Para fluxo novo: usa o draft local enquanto não foi salvo. Cliente aberto pela tela Clientes (id do banco)
+  // não cai no primeiro cliente de demonstração enquanto carrega, para não mostrar dados de outra empresa.
+  const cliente = dbCliente || (isNovoFlow && novoDraft)
+    ? (novoDraft || dbCliente)
+    : (clienteMock || (params.clienteId ? null : ativos[0]));
+  const aguardandoBanco = !cliente && !isNovoFlow && !!clienteId && dbRespondeu !== clienteId
+    && typeof window.MenctorDB?.getClient === "function";
+  const opcoesSeletor = clientesBanco
+    ? clientesBanco.filter(c => c.status === "ativo" || c.status === "negociacao")
+    : ativos;
   const est = etapasState[clienteId] || (window.ETAPAS_ESTADO_INICIAL ? window.ETAPAS_ESTADO_INICIAL() : { etapaAtual: 1, status: {} });
 
   const currentEtapa = etapas.find(e => e.n === etapaSel) || etapas[0];
@@ -169,8 +196,8 @@ const RoadmapScreen = ({ navigate, params = {} }) => {
       }
     }
 
-    // Persist step data to Supabase
-    if (window.MenctorDB && typeof window.MenctorDB.saveStepProgress === "function" && clienteId) {
+    // Grava o progresso no banco (o rascunho de novo cliente ainda não existe lá; o bloco de criação abaixo grava a etapa 1)
+    if (window.MenctorDB && typeof window.MenctorDB.saveStepProgress === "function" && clienteId && !(isNovoFlow && novoDraft)) {
       const extra = { ...patch };
       delete extra.status;
       window.MenctorDB.saveStepProgress(clienteId, n, patch.status || "em_andamento", extra).catch(err => {
@@ -186,7 +213,8 @@ const RoadmapScreen = ({ navigate, params = {} }) => {
       });
     }
 
-    // No fluxo de novo: cria no Supabase quando salva o cadastro
+    // No fluxo de novo: cria no PostgreSQL quando salva o cadastro
+    // Depois redireciona para a tela Clientes (o cliente aparece listado lá)
     if (n === 1 && patch.status === "concluida" && isNovoFlow && novoDraft) {
       (async () => {
         try {
@@ -195,22 +223,26 @@ const RoadmapScreen = ({ navigate, params = {} }) => {
               name: patch.razaoSocial || novoDraft.name,
               cnpj: patch.cnpj || "",
               contact: patch.responsavel || "",
-              mrr: patch.mrr || novoDraft.mrr,
+              sector: patch.segmento || novoDraft.sector || "Serviços",
+              employees: Number(patch.qtdCargos) || novoDraft.employees || 50,
+              mrr: Number(patch.mrr) || novoDraft.mrr || 3500,
+              color: novoDraft.color || "#2F7D6F",
             });
             if (window.MenctorDB.saveCadastro) {
               await window.MenctorDB.saveCadastro(created.id, patch);
             }
-            setClienteId(created.id);
-            setNovoDraft(null);
-            console.log("Novo cliente criado no Supabase:", created.id);
+            console.log("[Menctor] Novo cliente criado no PostgreSQL:", created.id);
+            // Redireciona para a lista de clientes; o card aparecerá lá
+            if (typeof navigate === "function") {
+              navigate("clientes");
+            }
           } else {
             materializeNovoCliente(patch);
+            if (typeof navigate === "function") navigate("clientes");
           }
         } catch (err) {
-          console.error("Erro ao criar cliente no Supabase:", err);
-          alert("Erro ao salvar no Supabase: " + err.message);
-          // fallback to local
-          materializeNovoCliente(patch);
+          console.error("[Menctor] Erro ao criar cliente:", err);
+          alert("Erro ao salvar o cadastro: " + err.message);
         }
       })();
     }
@@ -231,6 +263,14 @@ const RoadmapScreen = ({ navigate, params = {} }) => {
     setEtapaSel(cEst.etapaAtual || 1);
     setDropOpen(false);
   };
+
+  if (aguardandoBanco) {
+    return (
+      <Page>
+        <div style={{ textAlign: "center", padding: "100px 0", color: "var(--ink-muted)" }}>Carregando cliente...</div>
+      </Page>
+    );
+  }
 
   if (!cliente) {
     return (
@@ -257,7 +297,7 @@ const RoadmapScreen = ({ navigate, params = {} }) => {
           <p style={{ margin: "6px 0 0", fontSize: 14.5, color: "var(--ink-muted)" }}>
             {(isNovoFlow && !!novoDraft)
               ? "Preencha o cadastro completo. Esta é a primeira etapa do projeto."
-              : "Acompanhe o fluxo completo do cliente: do cadastro à apresentação do plano de ação."}
+              : "Acompanhe o fluxo completo do cliente: do cadastro ao plano de ação."}
           </p>
         </div>
 
@@ -271,7 +311,7 @@ const RoadmapScreen = ({ navigate, params = {} }) => {
             </button>
             {dropOpen && (
               <div style={{ position: "absolute", right: 0, top: "100%", marginTop: 6, background: "var(--surface)", border: "1px solid var(--line)", borderRadius: 12, boxShadow: "var(--shadow-modal)", zIndex: 50, minWidth: 240, padding: 6 }}>
-                {ativos.map(c => (
+                {opcoesSeletor.map(c => (
                   <button key={c.id} onClick={() => switchCliente(c.id)} style={{ width: "100%", textAlign: "left", padding: "9px 12px", borderRadius: 8, background: c.id === clienteId ? "var(--surface-sage)" : "transparent", display: "flex", gap: 10, alignItems: "center" }}>
                     <span style={{ width: 24, height: 24, borderRadius: 6, background: c.color, color: "#fff", display: "inline-flex", alignItems: "center", justifyContent: "center", fontSize: 12, fontWeight: 700 }}>{c.name[0]}</span>
                     <span style={{ fontSize: 13, fontWeight: 600 }}>{c.name}</span>
@@ -297,7 +337,7 @@ const RoadmapScreen = ({ navigate, params = {} }) => {
           const isDone = s.status === "concluida" || s.aceito === true;
           const isActive = et.n === etapaSel;
           const isCurrent = et.n === (est.etapaAtual || 1);
-          const isEntrevistaBloqueada = et.n === 6 && !((est.status[5]?.instrumentos || []).includes("entrevista"));
+          const isEntrevistaBloqueada = et.n === 7 && !((est.status[6]?.instrumentos || []).includes("entrevista"));
 
           return (
             <button
@@ -383,83 +423,100 @@ const RoadmapScreen = ({ navigate, params = {} }) => {
             />
           )}
 
-          {/* 2. PROPOSTA — mostra em tela, enviar link, checkbox aceitar (como contratos) */}
+          {/* 2. ESTRUTURA ORGANIZACIONAL (Etapa 2) */}
           {etapaSel === 2 && (
-            <PropostaEtapa
-              cliente={cliente}
-              cadastro={{ ...(cliente.cadastro || {}), ...(est.status[1] || {}) }}
-              data={est.status[2] || {}}
-              onUpdate={(patch) => updEtapa(2, patch)}
-              onNext={() => setEtapaAtual(3)}
-            />
+            <div>
+              <EstruturaOrganizacionalEtapa
+                cliente={cliente}
+                onNext={() => setEtapaAtual(3)}
+                onNavigateMatriz={() => {
+                  if (typeof navigate === "function") navigate("matriz-risco");
+                  else setEtapaAtual(3);
+                }}
+              />
+            </div>
           )}
 
-          {/* 3. CONTRATO — aceite com check */}
+          {/* 3. MATRIZ DE RISCO — ocupa a etapa inteira, sem nada de contrato */}
           {etapaSel === 3 && (
-            <ContratoEtapa
+            <MatrizRiscoEtapa
               cliente={cliente}
-              cadastro={{ ...(cliente.cadastro || {}), ...(est.status[1] || {}) }}
+              navigate={navigate}
               data={est.status[3] || {}}
               onUpdate={(patch) => updEtapa(3, patch)}
               onNext={() => setEtapaAtual(4)}
             />
           )}
 
-          {/* 4. SENSIBILIZAÇÃO — cards simples */}
+          {/* 4. SENSIBILIZAÇÃO — Campanhas de coleta do cliente */}
           {etapaSel === 4 && (
             <SensibilizacaoEtapa
+              cliente={cliente}
+              navigate={navigate}
               data={est.status[4] || {}}
               onUpdate={(patch) => updEtapa(4, patch)}
               onNext={() => setEtapaAtual(5)}
             />
           )}
 
-          {/* 5. DIAGNÓSTICO — Selecionar COPSOQ II, HSE, Entrevista, DRPS e Clima */}
+          {/* 5. INDICADORES — indicadores de saúde ocupacional frente aos limites de referência */}
           {etapaSel === 5 && (
-            <DiagnosticoEtapa
+            <IndicadoresEtapa
+              cliente={cliente}
               data={est.status[5] || {}}
               onUpdate={(patch) => updEtapa(5, patch)}
+              onNext={() => setEtapaAtual(6)}
+            />
+          )}
+
+          {/* 6. DIAGNÓSTICO — Selecionar COPSOQ II, HSE, Entrevista, DRPS e Clima */}
+          {etapaSel === 6 && (
+            <DiagnosticoEtapa
+              data={est.status[6] || {}}
+              onUpdate={(patch) => updEtapa(6, patch)}
               onNext={(target) => {
-                const hasEnt = (est.status[5]?.instrumentos || []).includes("entrevista");
-                setEtapaAtual(target || (hasEnt ? 6 : 7));
+                const hasEnt = (est.status[6]?.instrumentos || []).includes("entrevista");
+                setEtapaAtual(target || (hasEnt ? 7 : 8));
               }}
             />
           )}
 
-          {/* 6. ENTREVISTAS — Roteiro qualitativo de 12 fatores por IA e avaliação de maturidade NR-1 */}
-          {etapaSel === 6 && (
+          {/* 7. ENTREVISTAS — Roteiro qualitativo de 12 fatores por IA e avaliação de maturidade NR-1 */}
+          {etapaSel === 7 && (
             <EntrevistasEtapa
               cliente={cliente}
-              diagnosticoData={est.status[5] || {}}
-              data={est.status[6] || {}}
-              onUpdate={(patch) => updEtapa(6, patch)}
-              onNext={() => setEtapaAtual(7)}
+              diagnosticoData={est.status[6] || {}}
+              data={est.status[7] || {}}
+              onUpdate={(patch) => updEtapa(7, patch)}
+              onNext={() => setEtapaAtual(8)}
               onHabilitarEntrevista={() => {
-                const curr = est.status[5]?.instrumentos || [];
+                const curr = est.status[6]?.instrumentos || [];
                 if (!curr.includes("entrevista")) {
-                  updEtapa(5, { instrumentos: [...curr, "entrevista"], status: "concluida" });
+                  updEtapa(6, { instrumentos: [...curr, "entrevista"], status: "concluida" });
                 }
               }}
             />
           )}
 
-          {/* 7. RELATÓRIOS — liberada automaticamente quando o Diagnóstico e Entrevistas são concluídos */}
-          {etapaSel === 7 && (
+          {/* 8. RELATÓRIOS — liberada automaticamente quando o Diagnóstico e Entrevistas são concluídos */}
+          {etapaSel === 8 && (
             <RelatoriosEtapa
               cliente={cliente}
-              diagnosticoData={est.status[5] || {}}
-              entrevistasData={est.status[6] || {}}
-              data={est.status[7] || {}}
-              onUpdate={(patch) => updEtapa(7, patch)}
-              onNext={() => setEtapaAtual(8)}
+              diagnosticoData={est.status[6] || {}}
+              entrevistasData={est.status[7] || {}}
+              data={est.status[8] || {}}
+              onUpdate={(patch) => updEtapa(8, patch)}
+              onNext={() => setEtapaAtual(9)}
             />
           )}
 
-          {/* 8. APRESENTAÇÃO — Reunião para discussão do plano de ação */}
-          {etapaSel === 8 && (
+          {/* 9. APRESENTAÇÃO — Reunião para discussão do plano de ação */}
+          {etapaSel === 9 && (
             <ApresentacaoEtapa
-              data={est.status[8] || {}}
-              onUpdate={(patch) => updEtapa(8, patch)}
+              cliente={cliente}
+              navigate={navigate}
+              data={est.status[9] || {}}
+              onUpdate={(patch) => updEtapa(9, patch)}
             />
           )}
         </div>
@@ -1307,715 +1364,846 @@ const SendProposalModal = ({ cliente, onClose }) => {
   );
 };
 
-// ════════════════════════════════════════════════════════════
-// Modal "Enviar Contrato" — paralelo ao de proposta
-// Gera link ?contrato=... + snapshot + envio
-// ════════════════════════════════════════════════════════════
-const SendContractModal = ({ cliente, contratoToken, valor, vigencia, onClose, onAccepted }) => {
-  const [copied, setCopied] = useState(false);
-  const [sent, setSent] = useState(false);
-  const [accepted, setAccepted] = useState(false);
+// 3. MATRIZ DE RISCO — a tela real da Matriz de Risco renderizada nativamente
+// dentro da etapa (sem iframe), sem nada relacionado a contrato.
+const MatrizRiscoEtapa = ({ cliente, navigate, data, onUpdate, onNext }) => (
+  <div>
+    <MatrizRiscoScreen navigate={navigate} clienteId={cliente?.id} params={{ clienteId: cliente?.id }} embedded />
 
-  const link = `${window.location.origin}/?contrato=${encodeURIComponent(contratoToken)}`;
-
-  // Save snapshot (mesmo formato que o PortalContratoScreen espera)
-  useEffect(() => {
-    try {
-      const snap = {
-        id: contratoToken,
-        empresa: cliente?.name || "Empresa",
-        contato: cliente?.contact || "",
-        email: cliente?.email || "",
-        funcionarios: cliente?.employees || 100,
-        valor: valor || cliente?.mrr || 3500,
-        vigencia: vigencia || "12",
-        savedAt: new Date().toISOString(),
-      };
-      window.localStorage.setItem(`MENCTOR_CONTRACT_${contratoToken}`, JSON.stringify(snap));
-    } catch (_) {}
-  }, [cliente, contratoToken, valor, vigencia]);
-
-  // Poll acceptance
-  useEffect(() => {
-    const check = () => {
-      try {
-        const acc = window.localStorage.getItem(`MENCTOR_CONTRACT_ACCEPTED_${contratoToken}`) ||
-                    window.localStorage.getItem(`MENCTOR_CONTRACT_ACCEPTED_${cliente?.id}`);
-        if (acc) {
-          const p = JSON.parse(acc);
-          if (p.acceptedAt) {
-            setAccepted(true);
-            if (onAccepted) onAccepted();
-          }
-        }
-      } catch (_) {}
-    };
-    check();
-    const iv = setInterval(check, 1500);
-    window.addEventListener("storage", check);
-    window.addEventListener("menctor:contract-accepted", check);
-    return () => { clearInterval(iv); window.removeEventListener("storage", check); window.removeEventListener("menctor:contract-accepted", check); };
-  }, [contratoToken, cliente?.id, onAccepted]);
-
-  const copyLink = async () => {
-    try {
-      await navigator.clipboard.writeText(link);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 2200);
-    } catch (_) {
-      window.prompt("Copie o link do contrato:", link);
-    }
-  };
-
-  const sendEmail = async () => {
-    const to = cliente?.email || cliente?.contactEmail || "";
-    const subject = `Contrato Menctor para ${cliente?.name || "sua empresa"}`;
-    const html = `
-      <div style="font-family:Arial,sans-serif;line-height:1.6;color:#1f2b26;max-width:560px">
-        <h2>Contrato Menctor — Prestação de Serviços (NR-1)</h2>
-        <p>Olá${cliente?.contact ? `, <strong>${cliente.contact}</strong>` : ""}.</p>
-        <p>Segue o contrato personalizado para <strong>${cliente?.name || "sua empresa"}</strong>.</p>
-        <div style="padding:12px;border-radius:8px;background:#f3faf6;border:1px solid #cde8dc;margin:12px 0">
-          Valor mensal: R$ ${Number(valor).toLocaleString("pt-BR")}<br/>
-          Colaboradores: ${cliente?.employees || 100}<br/>
-          Vigência: ${vigencia} meses
-        </div>
-        <p><a href="${link}" style="display:inline-block;background:#E87722;color:#fff;text-decoration:none;padding:14px 26px;border-radius:999px;font-weight:700">Abrir contrato e assinar</a></p>
-        <p style="font-size:13px;color:#666">Ou cole: ${link}</p>
-        <p>Abraços,<br/>Equipe Menctor</p>
-      </div>`;
-
-    try {
-      if (typeof sendTransactionalEmail === "function") {
-        await sendTransactionalEmail({ to, subject, html });
-      } else {
-        window.open(`mailto:${to}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent("Link para assinar o contrato: " + link)}`);
-      }
-      setSent(true);
-      setTimeout(() => setSent(false), 3000);
-    } catch (e) {
-      await copyLink();
-      alert("Link copiado. Cole no e-mail do cliente.");
-    }
-  };
-
-  return (
-    <div style={{ position: "fixed", inset: 0, zIndex: 9999, background: "rgba(0,0,0,0.42)", backdropFilter: "blur(6px)", display: "flex", alignItems: "center", justifyContent: "center", padding: 24 }} onClick={onClose}>
-      <div onClick={e => e.stopPropagation()} style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 12, padding: "32px 36px", width: "100%", maxWidth: 520, boxShadow: "var(--shadow-modal)" }}>
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 18 }}>
-          <div>
-            <div style={{ fontFamily: "var(--display)", fontWeight: 600, fontSize: 20 }}>Enviar contrato</div>
-            <div style={{ fontSize: 13, color: "var(--ink-muted)", marginTop: 3 }}>O cliente abre o link e assina digitalmente.</div>
-          </div>
-          <button onClick={onClose} style={{ color: "var(--ink-muted)" }}><Icon name="x" size={18} /></button>
-        </div>
-
-        <div style={{ padding: 14, background: "var(--canvas-warm)", borderRadius: 8, marginBottom: 16, fontSize: 13 }}>
-          Link: <code style={{ fontSize: 12 }}>{link}</code>
-        </div>
-
-        <div style={{ display: "flex", gap: 10 }}>
-          <button onClick={copyLink} className="btn btn-soft" style={{ flex: 1 }}>
-            {copied ? "✓ Copiado!" : "Copiar link"}
-          </button>
-          <button onClick={sendEmail} className="btn btn-primary" style={{ flex: 1 }}>
-            {sent ? "Enviado!" : "Enviar por e-mail"}
-          </button>
-        </div>
-
-        {accepted && (
-          <div style={{ marginTop: 14, padding: 12, background: "var(--surface-sage)", borderRadius: 8, color: "var(--health-deep)", fontSize: 13, textAlign: "center" }}>
-            ✓ Cliente já assinou pelo link!
-          </div>
-        )}
-
-        <div style={{ marginTop: 16, fontSize: 12, color: "var(--ink-muted)" }}>
-          Quando o cliente assinar no portal, a etapa será marcada automaticamente.
-        </div>
-      </div>
+    <div style={{ marginTop: 18, display: "flex", justifyContent: "flex-end", gap: 8 }}>
+      {data.status !== "concluida" && (
+        <button onClick={() => onUpdate({ status: "concluida" })} className="btn btn-soft" style={{ height: 38 }}>Marcar etapa como concluída</button>
+      )}
+      <button onClick={onNext} className="btn btn-accent" style={{ height: 38 }}>Avançar para Sensibilização <Icon name="arrow-right" size={14} /></button>
     </div>
+  </div>
+);
+
+// ════════════════════════════════════════════════════════════
+// 4. SENSIBILIZAÇÃO — Modal e gestão específicos da Etapa 4
+// ════════════════════════════════════════════════════════════
+const SensibilizacaoModal = ({ initial, onClose, onSave, forceClienteId, forceClienteNome }) => {
+  const isEdit = !!initial;
+  const [titulo, setTitulo] = React.useState(initial?.titulo || "");
+  const [clienteId, setClienteId] = React.useState(initial?.clienteId || forceClienteId || "");
+  const [dataInicial, setDataInicial] = React.useState(initial?.dataInicial || initial?.data_inicial || "");
+  const [dataFinal, setDataFinal] = React.useState(initial?.dataFinal || initial?.data_final || "");
+  const [numEventosPresenciais, setNumEventosPresenciais] = React.useState(() => {
+    if (initial?.numEventosPresenciais !== undefined && initial?.numEventosPresenciais !== null) {
+      return String(initial.numEventosPresenciais);
+    }
+    if (initial?.extra?.numEventosPresenciais !== undefined && initial?.extra?.numEventosPresenciais !== null) {
+      return String(initial.extra.numEventosPresenciais);
+    }
+    return "";
+  });
+  const [agenda, setAgenda] = React.useState(
+    initial?.agenda || initial?.extra?.agenda || ""
   );
-};
+  const [status, setStatus] = React.useState(() => {
+    if (!initial) return "pendente";
+    if (initial.status === "concluida" || initial.status === "encerrada") return "concluida";
+    if (initial.status === "em_andamento" || initial.status === "ativa") return "em_andamento";
+    return "pendente";
+  });
 
-// 3. CONTRATO — agora com preview rico + link + aceite automático (exatamente como a etapa Proposta)
-const ContratoEtapa = ({ cliente, data, onUpdate, onNext }) => {
-  const [aceito, setAceito] = useState(!!data.aceito);
-  const [showSendModal, setShowSendModal] = useState(false);
+  const cliente = (window.CLIENTES || []).find(c => c.id === (clienteId || forceClienteId));
 
-  // Token consistente para o link do contrato (igual ao da proposta)
-  const contratoToken = cliente?.id || `ctr-${Date.now().toString(36)}`;
-  const link = `${window.location.origin}/?contrato=${encodeURIComponent(contratoToken)}`;
+  const valido = titulo.trim() && (clienteId || forceClienteId) && dataInicial && dataFinal;
 
-  // Dados editáveis do contrato (valor e vigência)
-  const [valor, setValor] = useState(() => data.mrr != null ? data.mrr : (cliente?.mrr ?? 3500));
-  const [vigencia, setVigencia] = useState(() => data.vigencia || "12");
-
-  // Salva snapshot para o portal público do contrato (usa a mesma chave do PortalContratoScreen)
-  const saveContractSnapshot = (v, vig) => {
-    try {
-      const snap = {
-        id: contratoToken,
-        empresa: cliente?.name || "Empresa",
-        contato: cliente?.contact || "",
-        email: cliente?.email || "",
-        funcionarios: cliente?.employees || 100,
-        valor: v,
-        vigencia: vig,
-        inicio: data.inicio || "01/07/2026",
-        savedAt: new Date().toISOString(),
-      };
-      window.localStorage.setItem(`MENCTOR_CONTRACT_${contratoToken}`, JSON.stringify(snap));
-    } catch (_) {}
+  const salvar = () => {
+    if (!valido) return;
+    const numEventos = numEventosPresenciais !== "" ? Number(numEventosPresenciais) : 0;
+    onSave({
+      ...(initial || {}),
+      id: initial?.id || `campanha-${Date.now()}`,
+      titulo: titulo.trim(),
+      clienteId: clienteId || forceClienteId,
+      dataInicial,
+      dataFinal,
+      numEventosPresenciais: numEventos,
+      agenda: agenda || "",
+      status, // "pendente" | "em_andamento" | "concluida"
+      // Preserva compatibilidade geral do sistema
+      quantidadeFuncionarios: initial?.quantidadeFuncionarios || (numEventos > 0 ? numEventos : 100),
+      diagnosticoId: initial?.diagnosticoId || "copsoq",
+      instrumento: initial?.instrumento || "COPSOQ",
+      ciclo: initial?.ciclo || "2026-Q1",
+      reavaliacao: initial?.reavaliacao || "30 dias",
+      descricao: initial?.descricao || "",
+      respondidos: initial?.respondidos || 0,
+      createdAt: initial?.createdAt || new Date().toISOString(),
+      extra: {
+        ...(initial?.extra || {}),
+        numEventosPresenciais: numEventos,
+        agenda: agenda || "",
+      },
+    });
   };
 
-  useEffect(() => {
-    saveContractSnapshot(valor, vigencia);
-  }, [valor, vigencia, cliente?.name, cliente?.employees, contratoToken]);
-
-  useEffect(() => {
-    if (data.mrr != null) setValor(data.mrr);
-    if (data.vigencia) setVigencia(data.vigencia);
-  }, [data.mrr, data.vigencia]);
-
-  const marcarAceite = (force = null) => {
-    const novo = force !== null ? force : !aceito;
-    setAceito(novo);
-    const patch = { aceito: novo, status: novo ? "concluida" : "em_andamento" };
-    if (novo) patch.contratoAceitoEm = new Date().toISOString();
-    onUpdate(patch);
+  const fieldStyle = {
+    width: "100%",
+    height: 42,
+    padding: "0 12px",
+    border: "1px solid var(--line)",
+    borderRadius: 10,
+    background: "var(--surface)",
+    color: "var(--ink)",
+    fontSize: 14,
+    outline: "none",
+    boxSizing: "border-box",
   };
 
-  // Auto-detect acceptance from the public contract portal link (MENCTOR_CONTRACT_ACCEPTED_*)
-  useEffect(() => {
-    const checkAcceptance = () => {
-      try {
-        if (cliente?.id) {
-          const specificKey = `MENCTOR_CONTRACT_ACCEPTED_${cliente.id}`;
-          const raw = localStorage.getItem(specificKey);
-          if (raw) {
-            const acc = JSON.parse(raw);
-            if (acc.acceptedAt && !aceito) {
-              setAceito(true);
-              onUpdate({ aceito: true, status: "concluida", contratoAceitoEm: acc.acceptedAt });
-              return;
-            }
-          }
-        }
-
-        const keys = [];
-        for (let i = 0; i < localStorage.length; i++) {
-          const k = localStorage.key(i);
-          if (k && k.startsWith("MENCTOR_CONTRACT_ACCEPTED_")) keys.push(k);
-        }
-        const match = keys.find(k => {
-          try {
-            const p = JSON.parse(localStorage.getItem(k) || "{}");
-            if (!p.id || !cliente) return false;
-            return p.id === cliente.id || p.empresa === cliente.name;
-          } catch (_) { return false; }
-        });
-        if (match) {
-          const acc = JSON.parse(localStorage.getItem(match) || "{}");
-          if (acc.acceptedAt && !aceito) {
-            setAceito(true);
-            onUpdate({ aceito: true, status: "concluida", contratoAceitoEm: acc.acceptedAt });
-          }
-        }
-      } catch (_) {}
-    };
-    checkAcceptance();
-    const iv = setInterval(checkAcceptance, 2000);
-    window.addEventListener("storage", checkAcceptance);
-    window.addEventListener("menctor:contract-accepted", checkAcceptance);
-    return () => { clearInterval(iv); window.removeEventListener("storage", checkAcceptance); window.removeEventListener("menctor:contract-accepted", checkAcceptance); };
-  }, [cliente, aceito, onUpdate]);
-
-  // Preview do contrato — EXATAMENTE igual ao que o cliente vê no link (?contrato=...)
-  // Replicamos a estrutura, resumos, escopo, timeline e action bar do PortalContratoScreen
-  const PreviewContrato = () => {
-    const fmt = (n) => Number(n || 0).toLocaleString("pt-BR");
-    const ticket = cliente.employees ? (valor / cliente.employees) : 16.11;
-    const empresa = cliente.name || "sua empresa";
-    const funcs = cliente.employees || 100;
-    const contato = cliente.contact || "gestor(a)";
-    const v = vigencia;
-
-    return (
-      <div style={{ 
-        background: "var(--canvas)", 
-        border: "1px solid var(--line)", 
-        borderRadius: 12, 
-        overflow: "hidden", 
-        boxShadow: "0 2px 8px rgba(0,0,0,0.04)", 
-        height: "100%", 
-        display: "flex", 
-        flexDirection: "column",
-        fontSize: "10px",
-        lineHeight: "1.25"
-      }}>
-        {/* browser bar exato como no portal-contrato */}
-        <div style={{
-          background: "var(--surface-2)", borderBottom: "1px solid var(--line)",
-          padding: "5px 8px", display: "flex", alignItems: "center", gap: 6, fontSize: 8, color: "var(--ink-muted)"
-        }}>
-          <Icon name="globe" size={10} />
-          <span>menctor.com.br/contrato/{(empresa || "cliente").toLowerCase().replace(/\s+/g, "-").slice(0, 20)}</span>
-          <span style={{ marginLeft: "auto", fontSize: 7 }}>Visão do cliente · assinatura de contrato</span>
+  return ReactDOM.createPortal((
+    <div onClick={onClose} style={{ position: "fixed", inset: 0, zIndex: 9999, background: "rgba(0,0,0,0.42)", backdropFilter: "blur(6px)", display: "flex", justifyContent: "center", alignItems: "center", padding: 24, animation: "fade-in 200ms ease-out" }}>
+      <div onClick={e => e.stopPropagation()} className="modal" style={{ width: "min(520px, 100%)", maxHeight: "90vh", overflowY: "auto", padding: 26, background: "var(--surface)", borderRadius: 16, border: "1px solid var(--line)", boxShadow: "0 20px 45px rgba(0,0,0,0.18)" }}>
+        
+        {/* Cabeçalho */}
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 4 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 9 }}>
+            <Icon name="calendar" size={18} color="var(--health-deep)" />
+            <span style={{ fontFamily: "var(--display)", fontWeight: 700, fontSize: 19, color: "var(--ink)" }}>
+              {isEdit ? "Editar sensibilização" : "Nova sensibilização"}
+            </span>
+          </div>
+          <button onClick={onClose} type="button" style={{ width: 30, height: 30, borderRadius: 9, display: "inline-flex", alignItems: "center", justifyContent: "center", color: "var(--ink-muted)", border: "none", background: "transparent", cursor: "pointer" }}>
+            <Icon name="x" size={16} />
+          </button>
         </div>
 
-        <div style={{ padding: "8px 10px", flex: 1, overflow: "auto" }}>
-          {/* hero */}
-          <div style={{ marginBottom: 8 }}>
-            <div style={{ fontSize: 8, color: "var(--health-deep)", fontWeight: 600, marginBottom: 2 }}>Contrato de prestação de serviços para {empresa}</div>
-            <div style={{ fontSize: 12, fontWeight: 700, lineHeight: 1.05, marginBottom: 3 }}>
-              Formalize a parceria.<br/>Saúde psicossocial e<br/><span style={{ fontStyle: "italic", color: "var(--health-deep)" }}>conformidade NR-1 garantidas.</span>
-            </div>
-            <div style={{ fontSize: 8, color: "var(--ink-soft)" }}>
-              Olá, <strong>{contato}</strong>. Este é o contrato personalizado para {empresa}.
-            </div>
+        <p style={{ margin: "4px 0 20px", fontSize: 13, color: "var(--ink-muted)" }}>
+          Crie uma campanha para coletar avaliações com período definido e controle de CPF único.
+        </p>
+
+        <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+          {/* Título da campanha */}
+          <div>
+            <div style={{ fontSize: 12.5, fontWeight: 600, color: "var(--ink-soft)", marginBottom: 6 }}>Título da campanha *</div>
+            <input
+              value={titulo}
+              onChange={e => setTitulo(e.target.value)}
+              placeholder="Avalia COPSOQ II — Julho 2026"
+              style={fieldStyle}
+            />
           </div>
 
-          {/* SUMMARY — 4 colunas exatamente como no portal público */}
-          <div style={{ 
-            background: "#fff", 
-            border: "1px solid var(--line)", 
-            borderRadius: 6, 
-            padding: "6px 8px", 
-            marginBottom: 8, 
-            display: "grid", 
-            gridTemplateColumns: "1fr 1fr 1fr 1fr", 
-            gap: 6 
-          }}>
-            <div>
-              <div style={{ fontSize: 7, color: "var(--ink-muted)", textTransform: "uppercase" }}>Investimento mensal</div>
-              <div style={{ fontFamily: "var(--display)", fontWeight: 700, fontSize: 14, color: "var(--ink)", lineHeight: 1, marginTop: 1 }}>
-                R$ {fmt(valor)}
-              </div>
-              <div style={{ fontSize: 7, color: "var(--ink-muted)" }}>R$ {ticket.toFixed(2).replace(".", ",")} / colab</div>
-            </div>
-            <div style={{ borderLeft: "1px solid var(--line)", paddingLeft: 5 }}>
-              <div style={{ fontSize: 7, color: "var(--ink-muted)", textTransform: "uppercase" }}>Colaboradores</div>
-              <div style={{ fontFamily: "var(--display)", fontWeight: 700, fontSize: 14, color: "var(--ink)", lineHeight: 1, marginTop: 1 }}>
-                {fmt(funcs)}
-              </div>
-              <div style={{ fontSize: 7, color: "var(--ink-muted)" }}>cobertos pelo contrato</div>
-            </div>
-            <div style={{ borderLeft: "1px solid var(--line)", paddingLeft: 5 }}>
-              <div style={{ fontSize: 7, color: "var(--ink-muted)", textTransform: "uppercase" }}>Vigência</div>
-              <div style={{ fontFamily: "var(--display)", fontWeight: 700, fontSize: 14, color: "var(--ink)", lineHeight: 1, marginTop: 1 }}>
-                {v}<span style={{ fontSize: 9, color: "var(--ink-muted)" }}> meses</span>
-              </div>
-              <div style={{ fontSize: 7, color: "var(--ink-muted)" }}>Renovável automaticamente</div>
-            </div>
-            <div style={{ borderLeft: "1px solid var(--line)", paddingLeft: 5 }}>
-              <div style={{ fontSize: 7, color: "var(--ink-muted)", textTransform: "uppercase" }}>Início</div>
-              <div style={{ fontFamily: "var(--display)", fontWeight: 700, fontSize: 11, color: "var(--ink)", lineHeight: 1.05, marginTop: 1 }}>
-                {data.inicio || "após assinatura"}
-              </div>
-              <div style={{ fontSize: 7, color: "var(--ink-muted)" }}>Após assinatura</div>
-            </div>
-          </div>
-
-          {/* Escopo do contrato — fiel ao portal */}
-          <div style={{ marginBottom: 6 }}>
-            <div style={{ fontWeight: 600, fontSize: 9, marginBottom: 2 }}>Escopo do contrato</div>
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 3 }}>
-              {[
-                { title: "Diagnóstico COPSOQ II + NR-1", desc: "Aplicação completa, relatórios e plano de ação com revisão trimestral." },
-                { title: "Conformidade regulatória", desc: "Entregáveis prontos para auditoria e fiscalização." },
-                { title: "Portal do colaborador", desc: "Acesso personalizado com trilhas e pulse surveys." },
-                { title: "Acompanhamento contínuo", desc: "6 trilhas, pulses mensais, dashboards e suporte." },
-              ].map((f, i) => (
-                <div key={i} style={{ padding: "3px 4px", background: "var(--surface)", borderRadius: 4, border: "1px solid var(--line)", fontSize: 7 }}>
-                  <div style={{ fontWeight: 600, color: "var(--ink)", fontSize: 7.5 }}>{f.title}</div>
-                  <div style={{ color: "var(--ink-muted)", fontSize: 6, lineHeight: 1.05, marginTop: 1 }}>{f.desc}</div>
+          {/* Empresa */}
+          <div>
+            <div style={{ fontSize: 12.5, fontWeight: 600, color: "var(--ink-soft)", marginBottom: 6 }}>Empresa *</div>
+            {forceClienteId ? (
+              <div style={{ ...fieldStyle, display: "flex", alignItems: "center", justifyContent: "space-between", color: "var(--ink)", background: "var(--surface-2)" }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                  <Icon name="lock" size={13} color="var(--ink-muted)" />
+                  <span>{forceClienteNome || cliente?.name || "Empresa selecionada"}</span>
                 </div>
-              ))}
-            </div>
-          </div>
-
-          {/* Após a assinatura — timeline fiel */}
-          <div style={{ marginBottom: 6 }}>
-            <div style={{ fontWeight: 600, fontSize: 9, marginBottom: 2 }}>Após a assinatura</div>
-            <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 3 }}>
-              {[
-                { n: "01", t: "Onboarding", d: "Reunião de implantação (até 7 dias)." },
-                { n: "02", t: "Sensibilização", d: "Palestra + trilhas liberadas." },
-                { n: "03", t: "Primeiro diagnóstico", d: "COPSOQ II em até 14 dias." },
-                { n: "04", t: "Resultados e plano", d: "Workshop + plano de ação." },
-              ].map(s => (
-                <div key={s.n} style={{ padding: "3px 4px", background: "var(--surface)", borderRadius: 4, border: "1px solid var(--line)" }}>
-                  <div style={{ fontFamily: "var(--display)", fontWeight: 600, fontSize: 10, color: "var(--health)", lineHeight: 1 }}>{s.n}</div>
-                  <div style={{ fontSize: 7, fontWeight: 600, color: "var(--ink)", marginTop: 1 }}>{s.t}</div>
-                  <div style={{ fontSize: 6, color: "var(--ink-muted)", marginTop: 1, lineHeight: 1.05 }}>{s.d}</div>
-                </div>
-              ))}
-            </div>
-          </div>
-
-          {/* Resumo dos termos (compacto) */}
-          <div style={{ padding: "4px 6px", background: "var(--surface)", borderRadius: 6, border: "1px solid var(--line)", marginBottom: 6, fontSize: 7 }}>
-            <div style={{ fontWeight: 600, marginBottom: 2 }}>Principais termos</div>
-            <div style={{ color: "var(--ink-muted)", lineHeight: 1.15 }}>
-              • Vigência {v} meses (renovável) • Confidencialidade total • Sem vínculo empregatício • Foro Curitiba/PR
-            </div>
-          </div>
-
-          {/* ACTION BAR — exatamente como no portal público */}
-          <div style={{ 
-            padding: "6px 8px", 
-            background: aceito ? "var(--health-deep)" : "var(--ink)", 
-            color: "#FAF8F2", 
-            borderRadius: 6, 
-            textAlign: "center", 
-            fontSize: 9, 
-            fontWeight: 600,
-            transition: "background 200ms ease"
-          }}>
-            {aceito ? "✓ Contrato assinado com sucesso!" : "Assinar contrato →"}
-          </div>
-        </div>
-
-        <div style={{ 
-          fontSize: 7, 
-          padding: "2px 6px", 
-          background: "var(--surface)", 
-          borderTop: "1px solid var(--line)", 
-          color: "var(--ink-muted)", 
-          textAlign: "center" 
-        }}>
-          Preview IDÊNTICO ao link enviado • atualiza em tempo real
-        </div>
-      </div>
-    );
-  };
-
-  const marcar = () => marcarAceite();
-
-  return (
-    <div style={{ display: "flex", gap: 20, maxWidth: 1100 }}>
-      {/* ESQUERDA: Preview do contrato (exatamente o que o cliente vê em ?contrato=...) */}
-      <div style={{ flex: "1 1 52%", minWidth: 320 }}>
-        <div style={{ fontSize: 11, fontWeight: 700, color: "var(--ink-muted)", marginBottom: 6, letterSpacing: ".04em" }}>
-          PREVIEW DO CONTRATO (exatamente o que o cliente vai visualizar)
-        </div>
-        <PreviewContrato />
-      </div>
-
-      {/* DIREITA: Controles + edição */}
-      <div style={{ flex: "1 1 48%", maxWidth: 460 }}>
-        <div style={{ background: "#fff", borderRadius: 14, padding: 20, border: "1px solid var(--line)" }}>
-          <div style={{ fontSize: 12, color: "var(--health-deep)", fontWeight: 700 }}>CONTRATO DE PRESTAÇÃO DE SERVIÇOS • NR-01</div>
-          <h3 style={{ margin: "6px 0 12px", fontSize: 18 }}>Contrato Menctor para {cliente.name}.</h3>
-
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 12 }}>
-            <InfoBox label="Colaboradores" value={cliente.employees} />
-            <InfoBox label="Vigência" value={`${vigencia} meses`} />
-          </div>
-
-          <div style={{ padding: 12, background: "var(--canvas-warm)", borderRadius: 8, fontSize: 12.5, lineHeight: 1.4 }}>
-            Escopo: portal personalizado, diagnósticos COPSOQ II, pulses mensais, trilhas, relatórios executivos e plano de ação.
-          </div>
-
-          {/* Edição do valor e vigência — atualiza preview + snapshot do link */}
-          <div style={{ marginTop: 12, display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
-            <div>
-              <div style={{ fontSize: 11, color: "var(--ink-muted)", textTransform: "uppercase", marginBottom: 3 }}>Valor mensal</div>
-              <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                <span style={{ fontSize: 14 }}>R$</span>
-                <input
-                  type="number"
-                  min="0"
-                  step="100"
-                  value={valor}
-                  disabled={aceito}
-                  onChange={(e) => {
-                    const num = Math.max(0, parseInt(e.target.value || "0", 10));
-                    setValor(num);
-                    onUpdate({ mrr: num });
-                    if (cliente) cliente.mrr = num;
-                  }}
-                  style={{ fontSize: 16, fontWeight: 700, border: "1px solid var(--line)", background: aceito ? "#f4f3f0" : "var(--surface)", padding: "3px 8px", borderRadius: 5, width: "100%" }}
-                />
+                <Icon name="chevron-down" size={14} color="var(--ink-muted)" />
               </div>
-            </div>
-            <div>
-              <div style={{ fontSize: 11, color: "var(--ink-muted)", textTransform: "uppercase", marginBottom: 3 }}>Vigência</div>
-              <select
-                value={vigencia}
-                disabled={aceito}
-                onChange={(e) => {
-                  const v = e.target.value;
-                  setVigencia(v);
-                  onUpdate({ vigencia: v });
-                }}
-                style={{ width: "100%", padding: "6px 8px", border: "1px solid var(--line)", borderRadius: 6, background: aceito ? "#f4f3f0" : "var(--surface)", fontSize: 14 }}
-              >
-                <option value="12">12 meses</option>
-                <option value="24">24 meses</option>
-                <option value="36">36 meses</option>
+            ) : (
+              <select value={clienteId} onChange={e => setClienteId(e.target.value)} style={fieldStyle}>
+                <option value="">Selecione a empresa</option>
+                {(window.CLIENTES || []).map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
               </select>
+            )}
+          </div>
+
+          {/* Datas: Data Inicial e Data Final */}
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+            <div>
+              <div style={{ fontSize: 12.5, fontWeight: 600, color: "var(--ink-soft)", marginBottom: 6 }}>Data Inicial *</div>
+              <input type="date" value={dataInicial} onChange={e => setDataInicial(e.target.value)} style={fieldStyle} />
+            </div>
+            <div>
+              <div style={{ fontSize: 12.5, fontWeight: 600, color: "var(--ink-soft)", marginBottom: 6 }}>Data Final *</div>
+              <input type="date" value={dataFinal} onChange={e => setDataFinal(e.target.value)} style={fieldStyle} />
             </div>
           </div>
-          <div style={{ fontSize: 10, color: "var(--ink-muted)", marginTop: 4 }}>Muda ao vivo no preview e no link enviado ao cliente</div>
+
+          {/* Nº eventos Presenciais e Agenda */}
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+            <div>
+              <div style={{ fontSize: 12.5, fontWeight: 600, color: "var(--ink-soft)", marginBottom: 6 }}>Nº eventos Presenciais</div>
+              <input
+                type="number"
+                min="0"
+                value={numEventosPresenciais}
+                onChange={e => setNumEventosPresenciais(e.target.value)}
+                placeholder="Ex: 5"
+                style={fieldStyle}
+              />
+            </div>
+            <div>
+              <div style={{ fontSize: 12.5, fontWeight: 600, color: "var(--ink-soft)", marginBottom: 6 }}>Agenda</div>
+              <input
+                type="date"
+                value={agenda}
+                onChange={e => setAgenda(e.target.value)}
+                style={fieldStyle}
+              />
+            </div>
+          </div>
+
+          {/* Status da Campanha */}
+          <div style={{ padding: "14px 16px", borderRadius: 10, background: "var(--surface-2)", border: "1px solid var(--line)" }}>
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
+              <div>
+                <div style={{ fontSize: 13, fontWeight: 600, color: "var(--ink)" }}>Status da Campanha</div>
+                <div style={{ fontSize: 11.5, color: "var(--ink-muted)", marginTop: 2 }}>
+                  {status === "pendente" && "Campanha aguardando início / agendada"}
+                  {status === "em_andamento" && "Campanha em andamento / recebendo avaliações"}
+                  {status === "concluida" && "Campanha finalizada / concluída"}
+                </div>
+              </div>
+            </div>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 6, background: "var(--surface)", padding: 4, borderRadius: 8, border: "1px solid var(--line)" }}>
+              {[
+                { id: "pendente", label: "Pendente", color: "var(--ink-muted)", activeBg: "var(--surface-2)", activeBorder: "var(--line-strong)" },
+                { id: "em_andamento", label: "Em andamento", color: "var(--accent)", activeBg: "var(--accent-soft, rgba(246, 107, 10, 0.12))", activeBorder: "var(--accent)" },
+                { id: "concluida", label: "Concluída", color: "var(--health-deep)", activeBg: "var(--surface-sage)", activeBorder: "var(--health)" },
+              ].map(opt => {
+                const isSelected = status === opt.id;
+                return (
+                  <button
+                    key={opt.id}
+                    type="button"
+                    onClick={() => setStatus(opt.id)}
+                    style={{
+                      padding: "8px 10px",
+                      borderRadius: 6,
+                      border: isSelected ? `1.5px solid ${opt.activeBorder}` : "1.5px solid transparent",
+                      background: isSelected ? opt.activeBg : "transparent",
+                      color: isSelected ? (opt.id === "em_andamento" ? "var(--accent)" : opt.id === "concluida" ? "var(--health-deep)" : "var(--ink)") : "var(--ink-muted)",
+                      fontSize: 12.5,
+                      fontWeight: isSelected ? 700 : 500,
+                      cursor: "pointer",
+                      transition: "all 0.15s ease",
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "center",
+                      gap: 6,
+                    }}
+                  >
+                    {isSelected && <span style={{ width: 6, height: 6, borderRadius: "50%", background: opt.color }} />}
+                    {opt.label}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+
+          {/* Dica sobre CPF único */}
+          <div style={{ padding: "10px 14px", borderRadius: 10, background: "var(--surface-sage)", border: "1px solid var(--health-soft)", fontSize: 12, color: "var(--health-deep)", lineHeight: 1.5 }}>
+            <strong>Dica:</strong> Cada CPF poderá responder apenas uma vez por campanha, garantindo respostas únicas e evitando duplicidades.
+          </div>
         </div>
 
-        {!aceito && (
-          <div style={{ marginTop: 10, display: "flex", gap: 8 }}>
-            <button className="btn btn-primary" onClick={() => setShowSendModal(true)} style={{ flex: 1 }}>
-              <Icon name="send" size={14} /> Enviar link do contrato
-            </button>
-            <button className="btn btn-soft" onClick={() => window.open(link, "_blank")}>
-              Ver no navegador
-            </button>
-          </div>
-        )}
-
-        {aceito ? (
-          <div style={{ marginTop: 12, padding: 14, borderRadius: 10, background: "var(--surface-sage)", border: "1px solid var(--health)", textAlign: "center" }}>
-            <div style={{ fontSize: 17, fontWeight: 700, color: "var(--health-deep)" }}>✓ Contrato assinado</div>
-            <div style={{ fontSize: 11, color: "var(--ink-muted)", margin: "2px 0 8px" }}>
-              {data.contratoAceitoEm ? new Date(data.contratoAceitoEm).toLocaleDateString("pt-BR") : ""}
-            </div>
-            <button onClick={onNext} className="btn btn-accent" style={{ height: 38, width: "100%" }}>
-              Avançar para Sensibilização
-            </button>
-          </div>
-        ) : (
-          <div style={{ marginTop: 10, padding: 10, borderRadius: 8, background: "var(--surface)", border: "1px solid var(--line)" }}>
-            <label style={{ display: "flex", gap: 8, fontSize: 13, cursor: "pointer", alignItems: "center" }}>
-              <input type="checkbox" checked={aceito} onChange={marcar} />
-              <span>Cliente aceitou o contrato (manual ou via link)</span>
-            </label>
-          </div>
-        )}
-
-        <div style={{ marginTop: 8 }}>
-          <button onClick={() => window.open(`/doc/contrato?cliente=${cliente.id}`, "_blank")} className="btn btn-soft" style={{ fontSize: 12 }}>
-            Ver contrato completo (PDF / doc)
+        {/* Botões do Rodapé */}
+        <div style={{ display: "flex", gap: 10, marginTop: 22 }}>
+          <button onClick={onClose} type="button" className="btn btn-ghost" style={{ flex: 1, justifyContent: "center", height: 42 }}>
+            Cancelar
+          </button>
+          <button onClick={salvar} disabled={!valido} type="button" className="btn btn-accent" style={{ flex: 1, justifyContent: "center", height: 42, opacity: valido ? 1 : 0.55 }}>
+            {isEdit ? "Salvar alterações" : "Criar Campanha"}
           </button>
         </div>
 
-        {showSendModal && <SendContractModal cliente={cliente} contratoToken={contratoToken} valor={valor} vigencia={vigencia} onClose={() => setShowSendModal(false)} onAccepted={() => marcarAceite(true)} />}
       </div>
+    </div>
+  ), document.body);
+};
+
+const SensibilizacaoCampanhaRow = ({ campanha: c, cliente, diagnostico, navigate, onLink, onDuplicar, onEditar, onExcluir }) => {
+  const formatarData = (iso) => {
+    if (!iso) return "";
+    const [y, m, d] = String(iso).slice(0, 10).split("-");
+    return d && m && y ? `${d}/${m}/${y}` : iso;
+  };
+
+  const statusConfig = {
+    concluida: { label: "Concluída", pillClass: "pill-success", dotColor: "var(--health)" },
+    em_andamento: { label: "Em andamento", pillClass: "pill-brand", dotColor: "var(--accent)" },
+    ativa: { label: "Em andamento", pillClass: "pill-brand", dotColor: "var(--accent)" },
+    pendente: { label: "Pendente", pillClass: "pill-neutral", dotColor: "var(--ink-muted)" },
+    inativa: { label: "Pendente", pillClass: "pill-neutral", dotColor: "var(--ink-muted)" },
+    encerrada: { label: "Encerrada", pillClass: "pill-neutral", dotColor: "var(--ink-muted)" },
+  };
+  const st = statusConfig[c.status] || statusConfig.pendente;
+  const numEventos = c.numEventosPresenciais ?? c.extra?.numEventosPresenciais;
+  const agendaVal = c.agenda || c.extra?.agenda;
+
+  const respondidos = window.getCampanhaRespondidos ? window.getCampanhaRespondidos(c) : (c.respondidos || 0);
+  const totalAlvo = c.quantidadeFuncionarios || 0;
+  const pct = totalAlvo ? Math.min(100, Math.round((respondidos / totalAlvo) * 100)) : 0;
+  const pctFormatted = totalAlvo ? ((respondidos / totalAlvo) * 100).toFixed(1).replace(".", ",") : "0,0";
+  const completa = respondidos >= totalAlvo && totalAlvo > 0;
+
+  return (
+    <div className="card" style={{ padding: "18px 22px", display: "flex", flexDirection: "column", gap: 14 }}>
+      <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 16, flexWrap: "wrap" }}>
+        <div style={{ flex: 1, minWidth: 260 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", marginBottom: 6 }}>
+            <span style={{ fontFamily: "var(--display)", fontWeight: 700, fontSize: 17.5, color: "var(--ink)" }}>{c.titulo}</span>
+            <span className={`pill ${st.pillClass}`} style={{ fontSize: 10.5, display: "inline-flex", alignItems: "center", gap: 5 }}>
+              <span style={{ width: 6, height: 6, borderRadius: "50%", background: st.dotColor }} />
+              {st.label}
+            </span>
+            {numEventos !== undefined && numEventos !== null && numEventos !== "" && (
+              <span className="pill" style={{ fontSize: 10.5, background: "var(--surface-2)", color: "var(--ink-soft)", border: "1px solid var(--line)", display: "inline-flex", alignItems: "center", gap: 5 }}>
+                <Icon name="users" size={11} /> {numEventos} evento{Number(numEventos) === 1 ? "" : "s"} presencial{Number(numEventos) === 1 ? "" : "is"}
+              </span>
+            )}
+            {agendaVal && (
+              <span className="pill" style={{ fontSize: 10.5, background: "var(--surface-sage)", color: "var(--health-deep)", display: "inline-flex", alignItems: "center", gap: 5 }}>
+                <Icon name="calendar" size={11} /> Agenda: {formatarData(agendaVal)}
+              </span>
+            )}
+          </div>
+
+          <div style={{ fontSize: 12.5, color: "var(--ink-muted)", display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+            <span><strong style={{ color: "var(--ink-soft)" }}>{cliente ? cliente.name : "Empresa"}</strong></span>
+            {diagnostico && (
+              <>
+                <span>·</span>
+                <span>{diagnostico.name}</span>
+              </>
+            )}
+            {(c.dataInicial || c.dataFinal) && (
+              <>
+                <span>·</span>
+                <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
+                  <Icon name="calendar" size={12} /> {c.dataInicial ? formatarData(c.dataInicial) : "—"} – {c.dataFinal ? formatarData(c.dataFinal) : "—"}
+                </span>
+              </>
+            )}
+          </div>
+
+          {c.descricao && (
+            <div style={{ fontSize: 12, color: "var(--ink-faint)", marginTop: 6, lineHeight: 1.4 }}>
+              {c.descricao}
+            </div>
+          )}
+        </div>
+
+        {/* Botões de Ação */}
+        <div style={{ display: "flex", alignItems: "center", gap: 6, flexShrink: 0 }}>
+          {onLink && (
+            <button onClick={() => onLink(c)} className="btn btn-soft" style={{ height: 34, fontSize: 12.5 }}>
+              <Icon name="link" size={13} /> Link
+            </button>
+          )}
+          <button onClick={() => onDuplicar(c)} title="Duplicar" style={{ width: 34, height: 34, borderRadius: 9, display: "inline-flex", alignItems: "center", justifyContent: "center", color: "var(--ink-muted)", border: "none", background: "transparent", cursor: "pointer" }}>
+            <Icon name="clipboard" size={15} />
+          </button>
+          <button onClick={() => onEditar(c)} title="Editar" style={{ width: 34, height: 34, borderRadius: 9, display: "inline-flex", alignItems: "center", justifyContent: "center", color: "var(--ink-muted)", border: "none", background: "transparent", cursor: "pointer" }}>
+            <Icon name="edit" size={15} />
+          </button>
+          <button onClick={() => onExcluir(c)} title="Excluir" style={{ width: 34, height: 34, borderRadius: 9, display: "inline-flex", alignItems: "center", justifyContent: "center", color: "var(--coral)", border: "none", background: "transparent", cursor: "pointer" }}>
+            <Icon name="trash" size={15} />
+          </button>
+        </div>
+      </div>
+
+      {/* Seção de Avaliações se houver totalAlvo ou respostas */}
+      {totalAlvo > 0 && (
+        <div style={{ padding: "10px 14px", background: "var(--surface-2)", borderRadius: 10, border: "1px solid var(--line)" }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
+            <span style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.06em", color: "var(--ink-muted)" }}>
+              Avaliações
+            </span>
+            <span style={{ fontSize: 12.5, fontWeight: 600, color: "var(--ink)" }}>
+              <strong>{respondidos}</strong> de <strong>{totalAlvo}</strong> recebidas · <span style={{ color: completa ? "var(--health-deep)" : "var(--accent)" }}>{pctFormatted}%</span>
+            </span>
+          </div>
+          <div style={{ height: 7, borderRadius: 999, background: "var(--line)", overflow: "hidden" }}>
+            <div style={{ height: "100%", width: `${pct}%`, borderRadius: 999, background: completa ? "var(--health)" : "var(--accent)", transition: "width .4s ease" }} />
+          </div>
+        </div>
+      )}
     </div>
   );
 };
 
-// 4. SENSIBILIZAÇÃO — igual à tela de Aprendizado (vitrine + featured + cards)
-const SensibilizacaoEtapa = ({ data, onUpdate, onNext }) => {
-  const [selectedIds, setSelectedIds] = React.useState(data.conteudosSelecionados || []);
-  const [selectedTrail, setSelectedTrail] = React.useState(null);
+// 4. SENSIBILIZAÇÃO — Campanhas de sensibilização da empresa
+const SensibilizacaoEtapa = ({ cliente, navigate, data, onUpdate, onNext }) => {
+  const [campanhas, setCampanhas] = React.useState(() => (window.CAMPANHAS || []));
+  const [creating, setCreating] = React.useState(false);
+  const [editing, setEditing] = React.useState(null);
+  const [linkFor, setLinkFor] = React.useState(null);
 
-  // Reutilizamos as TRILHAS do aprendizado (todas são psicossociais)
-  const trilhas = (window.TRILHAS || [
-    { id: "t1", nome: "Saúde mental para gestores", modulos: 6, duracao: "3h 20min", inscritos: 142, conclusao: 67, capa: "linear-gradient(135deg, #2F7D6F, #5BAD72)" },
-    { id: "t2", nome: "NR-1 na prática", modulos: 4, duracao: "1h 50min", inscritos: 89, conclusao: 82, capa: "linear-gradient(135deg, #4E83A8, #2F7D6F)" },
-    { id: "t3", nome: "Liderança humanizada", modulos: 8, duracao: "5h", inscritos: 56, conclusao: 41, capa: "linear-gradient(135deg, #D89A3F, #E87722)" },
-    { id: "t4", nome: "Resiliência e regulação emocional", modulos: 5, duracao: "2h 40min", inscritos: 211, conclusao: 73, capa: "linear-gradient(135deg, #C75A4C, #D89A3F)" },
-  ]);
+  const [filtroDiagnostico, setFiltroDiagnostico] = React.useState("");
+  const [filtroStatus, setFiltroStatus] = React.useState("");
+  const [filtroCiclo, setFiltroCiclo] = React.useState("");
 
-  const toggleSelect = (id) => {
-    const novo = selectedIds.includes(id)
-      ? selectedIds.filter(x => x !== id)
-      : [...selectedIds, id];
-    setSelectedIds(novo);
-    const done = novo.length >= 2;
-    onUpdate({ conteudosSelecionados: novo, status: done ? "concluida" : "em_andamento" });
+  const diagnosticoById = (id) => (window.DIAGNOSTICOS || []).find(d => d.id === id);
+  const getStatusEfetivo = window.getCampanhaStatusEfetivo || (c => c.status);
+
+  const campanhasDoCliente = React.useMemo(
+    () => campanhas.filter(c => c.clienteId === cliente?.id),
+    [campanhas, cliente]
+  );
+
+  const ciclosDisponiveis = React.useMemo(() => {
+    const set = new Set();
+    campanhasDoCliente.forEach(c => { if (c.ciclo) set.add(c.ciclo); });
+    return Array.from(set).sort();
+  }, [campanhasDoCliente]);
+
+  const campanhasFiltradas = React.useMemo(() => {
+    return campanhasDoCliente.filter(c => {
+      if (filtroDiagnostico && c.diagnosticoId !== filtroDiagnostico) return false;
+      if (filtroStatus) {
+        const statusEfetivo = getStatusEfetivo(c);
+        if (filtroStatus === "em_andamento" && c.status !== "em_andamento" && c.status !== "ativa") return false;
+        if (filtroStatus === "pendente" && c.status !== "pendente" && c.status !== "inativa") return false;
+        if (filtroStatus === "concluida" && c.status !== "concluida" && statusEfetivo !== "encerrada") return false;
+        if (filtroStatus === "ativa" && c.status !== "ativa" && c.status !== "em_andamento") return false;
+        if (filtroStatus === "inativa" && c.status !== "inativa" && c.status !== "pendente") return false;
+        if (filtroStatus === "encerrada" && statusEfetivo !== "encerrada" && c.status !== "concluida") return false;
+      }
+      if (filtroCiclo && c.ciclo !== filtroCiclo) return false;
+      return true;
+    });
+  }, [campanhasDoCliente, filtroDiagnostico, filtroStatus, filtroCiclo]);
+
+  const temFiltroAtivo = !!(filtroDiagnostico || filtroStatus || filtroCiclo);
+
+  const marcarProgresso = (lista) => {
+    onUpdate({ status: lista.length > 0 ? "concluida" : "em_andamento" });
   };
 
-  // Featured: primeira trilha
-  const featured = trilhas[0];
+  const upsertCampanha = (campanha) => {
+    setCampanhas(prev => {
+      const exists = prev.some(c => c.id === campanha.id);
+      const next = exists ? prev.map(c => c.id === campanha.id ? campanha : c) : [campanha, ...prev];
+      window.CAMPANHAS = next;
+      marcarProgresso(next.filter(c => c.clienteId === cliente?.id));
+      return next;
+    });
+    setCreating(false);
+    setEditing(null);
+    if (window.MenctorDB && typeof window.MenctorDB.upsertCampanha === "function") {
+      window.MenctorDB.upsertCampanha(campanha).catch(err => console.warn("Falha ao persistir campanha no backend:", err));
+    }
+  };
 
-  if (selectedTrail) {
-    // Detalhe estilo TrailDetail (dentro da etapa)
-    const modules = [
-      "Identificando sinais de burnout na equipe",
-      "Conversas difíceis com colaboradores em risco",
-      "Construindo cultura de cuidado",
-      "Reuniões 1:1 que cuidam",
-      "Métricas de bem-estar para gestão",
-      "Quando encaminhar para apoio profissional",
-    ];
-    const isSel = selectedIds.includes(selectedTrail.id);
+  const duplicar = (campanha) => {
+    const copia = { ...campanha, id: `campanha-${Date.now()}`, titulo: `${campanha.titulo} (cópia)`, status: "pendente", respondidos: 0, createdAt: new Date().toISOString() };
+    setCampanhas(prev => {
+      const next = [copia, ...prev];
+      window.CAMPANHAS = next;
+      return next;
+    });
+    if (window.MenctorDB && typeof window.MenctorDB.upsertCampanha === "function") {
+      window.MenctorDB.upsertCampanha(copia).catch(err => console.warn("Falha ao persistir cópia no backend:", err));
+    }
+  };
 
-    return (
-      <div>
-        <button onClick={() => setSelectedTrail(null)} style={{ display: "inline-flex", alignItems: "center", gap: 6, color: "var(--ink-muted)", fontSize: 13, marginBottom: 16 }}>
-          <Icon name="chevron-left" size={14}/> Voltar para vitrine
+  const excluir = (campanha) => {
+    if (!window.confirm(`Excluir a campanha "${campanha.titulo}"? Essa ação não pode ser desfeita.`)) return;
+    setCampanhas(prev => {
+      const next = prev.filter(c => c.id !== campanha.id);
+      window.CAMPANHAS = next;
+      marcarProgresso(next.filter(c => c.clienteId === cliente?.id));
+      return next;
+    });
+    if (window.MenctorDB && typeof window.MenctorDB.deleteCampanha === "function") {
+      window.MenctorDB.deleteCampanha(campanha.id).catch(err => console.warn("Falha ao excluir campanha no backend:", err));
+    }
+  };
+
+  const filterSelectStyle = {
+    height: 38, padding: "0 10px", borderRadius: 9, border: "1px solid var(--line)",
+    background: "var(--surface)", color: "var(--ink)", fontSize: 13, fontWeight: 500, outline: "none", cursor: "pointer",
+  };
+
+  return (
+    <div>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-end", marginBottom: 20, gap: 16, flexWrap: "wrap" }}>
+        <p style={{ margin: 0, fontSize: 14, color: "var(--ink-muted)", maxWidth: 560 }}>
+          Gere campanhas com período definido para os diagnósticos habilitados desta empresa, e distribua o link de resposta com controle de CPF único.
+        </p>
+        <button onClick={() => setCreating(true)} className="btn btn-accent" style={{ height: 42, padding: "0 18px", fontSize: 14, flexShrink: 0 }}>
+          <Icon name="plus" size={16} /> Nova Campanha
         </button>
+      </div>
 
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 24, marginBottom: 24, alignItems: "start" }}>
-          <div>
-            <div className="eyebrow" style={{ marginBottom: 8 }}>Conteúdo de Sensibilização · {selectedTrail.modulos} módulos · {selectedTrail.duracao}</div>
-            <h1 className="display" style={{ fontSize: 32, margin: 0 }}>{selectedTrail.nome}</h1>
-            <div style={{ display: "flex", gap: 16, marginTop: 12, fontSize: 13, color: "var(--ink-muted)" }}>
-              <span><strong style={{ color: "var(--ink)" }}>{selectedTrail.inscritos}</strong> inscritos</span>
-              <span><strong style={{ color: "var(--ink)" }}>{selectedTrail.conclusao}%</strong> conclusão média</span>
-            </div>
-            <div style={{ display: "flex", gap: 10, marginTop: 18 }}>
-              <button 
-                onClick={() => toggleSelect(selectedTrail.id)} 
-                className="btn btn-accent" 
-                style={{ height: 38, padding: "0 18px" }}
-              >
-                {isSel ? "Remover da sensibilização" : "Selecionar para o cliente"} <Icon name="check" size={14}/>
-              </button>
-              <button className="btn btn-soft" style={{ height: 38 }}>
-                Pré-visualizar
-              </button>
-            </div>
-          </div>
-          <div style={{ height: 180, borderRadius: 16, background: selectedTrail.capa }} />
+      {/* Filtros */}
+      <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center", marginBottom: 20, padding: "12px 14px", borderRadius: 12, background: "var(--surface-2)", border: "1px solid var(--line)" }}>
+        <div style={{ flex: "1 1 200px", minWidth: 160 }}>
+          <select value={filtroDiagnostico} onChange={e => setFiltroDiagnostico(e.target.value)} style={{ ...filterSelectStyle, width: "100%" }}>
+            <option value="">Diagnóstico (todos)</option>
+            {(window.DIAGNOSTICOS || []).map(d => <option key={d.id} value={d.id}>{d.name}</option>)}
+          </select>
         </div>
+        <div style={{ flex: "1 1 160px", minWidth: 140 }}>
+          <select value={filtroStatus} onChange={e => setFiltroStatus(e.target.value)} style={{ ...filterSelectStyle, width: "100%" }}>
+            <option value="">Status (todos)</option>
+            <option value="em_andamento">Em andamento</option>
+            <option value="pendente">Pendente</option>
+            <option value="concluida">Concluída</option>
+            <option value="ativa">Ativa</option>
+            <option value="inativa">Inativa / Pausada</option>
+          </select>
+        </div>
+        <div style={{ flex: "1 1 140px", minWidth: 120 }}>
+          <select value={filtroCiclo} onChange={e => setFiltroCiclo(e.target.value)} style={{ ...filterSelectStyle, width: "100%" }}>
+            <option value="">Ciclo (todos)</option>
+            {ciclosDisponiveis.map(c => <option key={c} value={c}>{c}</option>)}
+          </select>
+        </div>
+        {temFiltroAtivo && (
+          <button onClick={() => { setFiltroDiagnostico(""); setFiltroStatus(""); setFiltroCiclo(""); }} className="btn btn-ghost" style={{ height: 38, fontSize: 12.5, padding: "0 12px", color: "var(--coral)" }}>
+            <Icon name="x" size={13} /> Limpar filtros
+          </button>
+        )}
+      </div>
 
-        <div className="card" style={{ padding: 24 }}>
-          <h2 className="display" style={{ fontSize: 20, margin: "0 0 16px" }}>Módulos / Conteúdo</h2>
-          {modules.map((m, i) => (
-            <div key={i} style={{ display: "flex", alignItems: "center", gap: 12, padding: "12px 0", borderTop: i > 0 ? "1px dashed var(--line)" : "none" }}>
-              <span style={{ width: 26, height: 26, borderRadius: 999, background: "#FFF4EC", color: "#F66B0A", display: "inline-flex", alignItems: "center", justifyContent: "center", fontSize: 11, fontWeight: 700 }}>{i + 1}</span>
-              <div style={{ flex: 1, fontSize: 14 }}>{m}</div>
-              <button className="btn btn-soft" style={{ height: 28, fontSize: 12 }}>Ver módulo</button>
-            </div>
+      {campanhasDoCliente.length === 0 ? (
+        <div className="card" style={{ padding: 40, textAlign: "center", color: "var(--ink-muted)" }}>
+          Nenhuma campanha criada ainda para {cliente?.name || "esta empresa"}. Clique em "Nova Campanha" para começar.
+        </div>
+      ) : campanhasFiltradas.length === 0 ? (
+        <div className="card" style={{ padding: 36, textAlign: "center", color: "var(--ink-muted)" }}>
+          Nenhuma campanha encontrada com os filtros selecionados.
+          <div style={{ marginTop: 10 }}>
+            <button onClick={() => { setFiltroDiagnostico(""); setFiltroStatus(""); setFiltroCiclo(""); }} className="btn btn-soft" style={{ height: 34, fontSize: 12.5 }}>Limpar filtros</button>
+          </div>
+        </div>
+      ) : (
+        <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+          {campanhasFiltradas.map(c => (
+            <SensibilizacaoCampanhaRow
+              key={c.id}
+              campanha={c}
+              cliente={cliente}
+              diagnostico={diagnosticoById(c.diagnosticoId)}
+              navigate={navigate}
+              onLink={setLinkFor}
+              onDuplicar={duplicar}
+              onEditar={setEditing}
+              onExcluir={excluir}
+            />
           ))}
         </div>
+      )}
 
-        <div style={{ marginTop: 16, display: "flex", gap: 8 }}>
-          <button onClick={() => setSelectedTrail(null)} className="btn btn-soft">Voltar</button>
-          <button onClick={onNext} className="btn btn-accent" disabled={selectedIds.length < 2}>
-            Avançar para Diagnóstico
-          </button>
+      {(creating || editing) && (
+        <SensibilizacaoModal
+          initial={editing}
+          forceClienteId={cliente?.id}
+          forceClienteNome={cliente?.name}
+          onClose={() => { setCreating(false); setEditing(null); }}
+          onSave={upsertCampanha}
+        />
+      )}
+
+      {linkFor && (
+        <LinkCampanhaModal campanha={linkFor} cliente={cliente} onClose={() => setLinkFor(null)} />
+      )}
+
+      <div style={{ marginTop: 18, display: "flex", justifyContent: "flex-end", gap: 8 }}>
+        {data.status !== "concluida" && (
+          <button onClick={() => onUpdate({ status: "concluida" })} className="btn btn-soft" style={{ height: 38 }}>Marcar etapa como concluída</button>
+        )}
+        <button onClick={onNext} className="btn btn-accent" style={{ height: 38 }}>Avançar para Indicadores <Icon name="arrow-right" size={14} /></button>
+      </div>
+    </div>
+  );
+};
+
+// 5. INDICADORES — indicadores de saúde ocupacional frente aos limites de referência
+const DonutIndicadores = ({ pct, size = 84 }) => {
+  const color = pct >= 50 ? "var(--coral)" : pct >= 20 ? "var(--amber)" : "var(--health)";
+  const r = (size - 12) / 2;
+  const c = 2 * Math.PI * r;
+  return (
+    <div style={{ position: "relative", width: size, height: size, flexShrink: 0 }}>
+      <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`}>
+        <circle cx={size / 2} cy={size / 2} r={r} fill="none" stroke="var(--line)" strokeWidth="9" />
+        <circle cx={size / 2} cy={size / 2} r={r} fill="none" stroke={color} strokeWidth="9"
+          strokeDasharray={c} strokeDashoffset={c * (1 - pct / 100)} strokeLinecap="round"
+          transform={`rotate(-90 ${size / 2} ${size / 2})`} />
+      </svg>
+      <div style={{ position: "absolute", inset: 0, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center" }}>
+        <div style={{ fontFamily: "var(--display)", fontWeight: 700, fontSize: size * 0.24, lineHeight: 1, color: "var(--ink)" }}>{pct}%</div>
+        <div style={{ fontSize: 8.5, color: "var(--ink-muted)", textTransform: "uppercase", letterSpacing: "0.04em" }}>em risco</div>
+      </div>
+    </div>
+  );
+};
+
+const IndicadorKpiCard = ({ icon, label, value, sub, pct, color }) => (
+  <div className="card" style={{ padding: 16 }}>
+    <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
+      <div style={{ width: 30, height: 30, borderRadius: 9, background: "var(--canvas-warm)", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+        <Icon name={icon} size={15} color={color} />
+      </div>
+      <div style={{ fontSize: 10.5, fontWeight: 700, color: "var(--ink-muted)", textTransform: "uppercase", letterSpacing: "0.05em" }}>{label}</div>
+    </div>
+    <div style={{ fontFamily: "var(--display)", fontWeight: 700, fontSize: 26, color: "var(--ink)", lineHeight: 1 }}>{value}</div>
+    <div style={{ fontSize: 11.5, color: "var(--ink-muted)", margin: "4px 0 10px" }}>{sub}</div>
+    <div style={{ height: 5, borderRadius: 999, background: "var(--line)", overflow: "hidden" }}>
+      <div style={{ height: "100%", width: `${pct}%`, background: color, borderRadius: 999, transition: "width .4s" }} />
+    </div>
+  </div>
+);
+
+const IndicadoresEtapa = ({ cliente, data, onUpdate, onNext }) => {
+  const fonte = (window.INDICADORES_CLIENTE || {})[cliente?.id];
+  const CLASS_META = window.INDICADORES_CLASSIFICACAO || {
+    risco_alto: { label: "Risco alto", cor: "var(--coral)", bg: "var(--coral-soft)" },
+    atencao: { label: "Atenção", cor: "var(--amber)", bg: "var(--amber-soft)" },
+    adequado: { label: "Adequado", cor: "var(--health)", bg: "var(--surface-sage)" },
+  };
+  const classificar = window.classificarIndicador || (() => "adequado");
+
+  if (!fonte || !(fonte.indicadores || []).length) {
+    return (
+      <div style={{ textAlign: "center", padding: "70px 20px" }}>
+        <Icon name="bar-chart" size={40} color="var(--ink-muted)" />
+        <h3 style={{ margin: "16px 0 6px", fontSize: 18 }}>Nenhum indicador cadastrado ainda</h3>
+        <p style={{ color: "var(--ink-muted)", fontSize: 13.5, maxWidth: 440, margin: "0 auto 20px" }}>
+          Assim que os indicadores de saúde ocupacional do cliente forem importados (absenteísmo, turnover, sinistralidade, ações judiciais...), eles aparecem aqui comparados aos limites de referência do PGR.
+        </p>
+        <div style={{ display: "flex", gap: 8, justifyContent: "center" }}>
+          <button onClick={() => onUpdate({ status: "concluida" })} className="btn btn-soft" style={{ height: 38 }}>Marcar etapa como concluída</button>
+          <button onClick={onNext} className="btn btn-accent" style={{ height: 38 }}>Avançar para Diagnóstico <Icon name="arrow-right" size={14} /></button>
         </div>
       </div>
     );
   }
 
+  const indicadores = fonte.indicadores.map(ind => {
+    const direcao = ind.direcao || "maior_pior";
+    const status = classificar(ind.atual, ind.limite, direcao);
+    const gap = Number((ind.atual - ind.limite).toFixed(ind.casas || 0));
+    return { ...ind, status, gap };
+  });
+
+  const totais = indicadores.length;
+  const porStatus = { risco_alto: 0, atencao: 0, adequado: 0 };
+  indicadores.forEach(i => { porStatus[i.status] = (porStatus[i.status] || 0) + 1; });
+  const pctEmRisco = Math.round(((porStatus.risco_alto + porStatus.atencao) / totais) * 100);
+
+  const fmt = (v, ind) => `${v.toFixed(ind.casas || 0)}${ind.sufixo || ""}`;
+  const fmtGap = (ind) => {
+    const sinal = ind.gap > 0 ? "+" : ind.gap < 0 ? "" : "±";
+    const unidade = ind.pp ? " p.p." : (ind.sufixo || "");
+    return `${sinal}${ind.gap.toFixed(ind.casas || 0)}${unidade}`;
+  };
+
+  const maioresGaps = [...indicadores].sort((a, b) => Math.abs(b.gap) - Math.abs(a.gap)).slice(0, 5);
+  const maiorGapAbs = Math.max(1, ...maioresGaps.map(m => Math.abs(m.gap)));
+
   return (
     <div>
-      {/* Header igual ao Aprendizado */}
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-end", marginBottom: 20 }}>
+      {/* Header */}
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-end", marginBottom: 20, flexWrap: "wrap", gap: 12 }}>
         <div>
-          <div className="eyebrow" style={{ marginBottom: 6 }}>Sensibilização · Conteúdos Psicossociais</div>
-          <h2 className="display" style={{ fontSize: 28, margin: 0 }}>Sensibilização</h2>
-          <p style={{ margin: "6px 0 0", fontSize: 14, color: "var(--ink-muted)", maxWidth: 520 }}>
-            Selecione as trilhas e materiais que serão usados na fase de sensibilização do cliente.
+          <div className="eyebrow" style={{ marginBottom: 6 }}>Indicadores de saúde ocupacional</div>
+          <h2 className="display" style={{ fontSize: 26, margin: 0, display: "flex", alignItems: "center", gap: 10 }}>
+            <Icon name="bar-chart" size={20} /> Indicadores
+          </h2>
+          <p style={{ margin: "6px 0 0", fontSize: 13.5, color: "var(--ink-muted)", maxWidth: 560 }}>
+            Acompanhe o desempenho dos indicadores de saúde ocupacional e identifique os principais gaps.
           </p>
         </div>
-        <div style={{ display: "flex", gap: 8 }}>
-          <button className="btn btn-soft" style={{ height: 34, fontSize: 13 }}><Icon name="filter" size={13}/> Filtrar</button>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          <button className="btn btn-soft" style={{ height: 36, fontSize: 12.5 }}><Icon name="calendar" size={13} /> {fonte.periodo}</button>
+          <button className="btn btn-soft" style={{ height: 36, fontSize: 12.5 }}><Icon name="map" size={13} /> {fonte.unidade}</button>
         </div>
       </div>
 
-      {/* Featured — igual ao Aprendizado */}
-      <div className="card" style={{ padding: 0, overflow: "hidden", marginBottom: 20, display: "grid", gridTemplateColumns: "1.3fr 1fr" }}>
-        <div style={{
-          background: "linear-gradient(135deg, #F66B0A 0%, #FF8636 100%)",
-          padding: 24, color: "#fff", display: "flex", flexDirection: "column", justifyContent: "space-between", minHeight: 220
-        }}>
-          <div>
-            <span style={{ fontSize: 10, fontWeight: 700, letterSpacing: "0.1em", textTransform: "uppercase", padding: "3px 8px", background: "rgba(255,255,255,0.18)", borderRadius: 999 }}>Em destaque para sensibilização</span>
-            <h3 className="display" style={{ fontSize: 24, margin: "12px 0 8px", color: "#fff", lineHeight: 1.1 }}>
-              {featured.nome}
-            </h3>
-            <p style={{ margin: 0, fontSize: 13, color: "rgba(255,255,255,0.85)", maxWidth: 300 }}>
-              {featured.modulos} módulos · {featured.duracao}. Recomendado para todos os clientes.
-            </p>
+      {/* KPI cards */}
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 12, marginBottom: 16 }}>
+        <IndicadorKpiCard icon="clipboard" label="Indicadores avaliados" value={totais} sub={`de ${totais} indicadores`} pct={100} color="var(--ink)" />
+        <IndicadorKpiCard icon="flag" label="Risco alto" value={porStatus.risco_alto} sub="indicadores fora do limite" pct={(porStatus.risco_alto / totais) * 100} color="var(--coral)" />
+        <IndicadorKpiCard icon="bell" label="Atenção" value={porStatus.atencao} sub="indicadores próximos do limite" pct={(porStatus.atencao / totais) * 100} color="var(--amber)" />
+        <IndicadorKpiCard icon="check" label="Adequado" value={porStatus.adequado} sub="indicadores dentro do limite" pct={(porStatus.adequado / totais) * 100} color="var(--health)" />
+      </div>
+
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 300px", gap: 14, alignItems: "start" }}>
+        {/* Tabela */}
+        <div className="card" style={{ padding: 0, overflow: "hidden" }}>
+          <div style={{ padding: "16px 20px", borderBottom: "1px solid var(--line)" }}>
+            <div style={{ fontWeight: 700, fontSize: 14.5, display: "flex", alignItems: "center", gap: 8 }}><Icon name="bar-chart" size={14} /> Indicadores Corporativos</div>
+            <div style={{ fontSize: 12, color: "var(--ink-muted)", marginTop: 3 }}>Visualize os indicadores, valores atuais, limites, gaps e status de cada área.</div>
           </div>
-          <div style={{ display: "flex", gap: 8, marginTop: 16 }}>
-            <button 
-              className="btn btn-primary" 
-              style={{ height: 34, fontSize: 13 }} 
-              onClick={() => toggleSelect(featured.id)}
-            >
-              {selectedIds.includes(featured.id) ? "Remover seleção" : "Selecionar para cliente"}
-            </button>
-            <button className="btn" style={{ background: "rgba(255,255,255,0.18)", color: "#fff", height: 34, fontSize: 13 }} onClick={() => setSelectedTrail(featured)}>
-              Ver conteúdo
-            </button>
+          <div style={{ display: "grid", gridTemplateColumns: "1.5fr 110px 66px 66px 82px 95px", gap: 6, padding: "8px 20px", fontSize: 10.5, fontWeight: 700, color: "var(--ink-muted)", textTransform: "uppercase", letterSpacing: "0.04em", borderBottom: "1px solid var(--line)" }}>
+            <span>Indicador</span><span>Categoria</span><span>Atual</span><span>Limite</span><span>Gap</span><span>Status</span>
+          </div>
+          {indicadores.map(ind => {
+            const meta = CLASS_META[ind.status] || {};
+            return (
+              <div key={ind.id} style={{ display: "grid", gridTemplateColumns: "1.5fr 110px 66px 66px 82px 95px", gap: 6, padding: "11px 20px", alignItems: "center", borderBottom: "1px solid var(--line)", fontSize: 12.5 }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 10, minWidth: 0 }}>
+                  <div style={{ width: 30, height: 30, borderRadius: 8, background: "var(--canvas-warm)", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+                    <Icon name={ind.icon} size={14} color="var(--ink-muted)" />
+                  </div>
+                  <div style={{ minWidth: 0 }}>
+                    <div style={{ fontWeight: 600, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{ind.label}</div>
+                    <div style={{ fontSize: 11, color: "var(--ink-muted)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{ind.desc}</div>
+                    {ind.acao && <div style={{ fontSize: 10.5, color: "var(--ink-muted)", fontStyle: "italic", marginTop: 2, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{ind.acao}</div>}
+                  </div>
+                </div>
+                <div style={{ color: "var(--ink-muted)", fontSize: 11.5, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{ind.categoria}</div>
+                <div style={{ fontWeight: 600 }}>{fmt(ind.atual, ind)}</div>
+                <div style={{ color: "var(--ink-muted)" }}>{fmt(ind.limite, ind)}</div>
+                <div style={{ display: "flex", alignItems: "center", gap: 4, color: meta.cor, fontWeight: 700, whiteSpace: "nowrap" }}>
+                  <Icon name={ind.gap > 0 ? "arrow-up" : ind.gap < 0 ? "arrow-down" : "check"} size={11} /> {fmtGap(ind)}
+                </div>
+                <span className="pill" style={{ background: meta.bg, color: meta.cor, fontSize: 10.5, fontWeight: 700, width: "fit-content" }}>{meta.label}</span>
+              </div>
+            );
+          })}
+          <div style={{ padding: "10px 20px", fontSize: 11.5, color: "var(--ink-muted)" }}>Mostrando 1–{totais} de {totais} indicadores</div>
+        </div>
+
+        {/* Sidebar */}
+        <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+          <div className="card" style={{ padding: 18 }}>
+            <div style={{ fontWeight: 700, fontSize: 13, marginBottom: 14, display: "flex", alignItems: "center", gap: 6 }}><Icon name="pulse" size={14} /> Visão geral dos indicadores</div>
+            <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
+              <DonutIndicadores pct={pctEmRisco} />
+              <div style={{ display: "flex", flexDirection: "column", gap: 7, fontSize: 12, flex: 1, minWidth: 0 }}>
+                {["risco_alto", "atencao", "adequado"].map(k => (
+                  <div key={k} style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                    <span style={{ width: 8, height: 8, borderRadius: 999, background: CLASS_META[k].cor, flexShrink: 0 }} />
+                    <span style={{ color: "var(--ink-muted)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{CLASS_META[k].label}</span>
+                    <span style={{ fontWeight: 700, marginLeft: "auto" }}>{porStatus[k] || 0} ({totais ? Math.round(((porStatus[k] || 0) / totais) * 100) : 0}%)</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+
+          <div className="card" style={{ padding: 18 }}>
+            <div style={{ fontWeight: 700, fontSize: 13, marginBottom: 12 }}>Maiores gaps identificados</div>
+            {maioresGaps.map(ind => {
+              const meta = CLASS_META[ind.status] || {};
+              const largura = Math.min(100, (Math.abs(ind.gap) / maiorGapAbs) * 100);
+              return (
+                <div key={ind.id} style={{ marginBottom: 10 }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", gap: 8, fontSize: 12, marginBottom: 4 }}>
+                    <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{ind.label}</span>
+                    <span style={{ fontWeight: 700, color: meta.cor, flexShrink: 0 }}>{fmtGap(ind)}</span>
+                  </div>
+                  <div style={{ height: 5, borderRadius: 999, background: "var(--line)", overflow: "hidden" }}>
+                    <div style={{ height: "100%", width: `${largura}%`, background: meta.cor, borderRadius: 999 }} />
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+
+          <div className="card" style={{ padding: 18 }}>
+            <div style={{ fontWeight: 700, fontSize: 13, marginBottom: 6 }}>Documentos e evidências relacionadas</div>
+            {(fonte.documentos || []).map((doc, i) => (
+              <div key={i} style={{ display: "flex", alignItems: "center", gap: 10, padding: "9px 0", borderTop: i > 0 ? "1px solid var(--line)" : "none" }}>
+                <Icon name="file-text" size={15} color="var(--ink-muted)" />
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontSize: 12.5, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{doc.titulo}</div>
+                  <div style={{ fontSize: 10.5, color: "var(--ink-muted)" }}>Última atualização: {doc.atualizadoEm}</div>
+                </div>
+                <Icon name="chevron-right" size={13} color="var(--ink-muted)" />
+              </div>
+            ))}
           </div>
         </div>
-        <div style={{ padding: 20, display: "flex", flexDirection: "column", justifyContent: "center", background: "var(--surface)", fontSize: 12.5 }}>
-          <div className="eyebrow" style={{ marginBottom: 10, fontSize: 10 }}>O que está dentro</div>
-          {["Introdução aos riscos psicossociais", "Como aplicar na prática", "Exemplos e cases", "Ferramentas para o RH", "Plano de comunicação"].map((t,i) => (
-            <div key={i} style={{ display: "flex", alignItems: "center", gap: 8, padding: "5px 0", borderTop: i > 0 ? "1px dashed var(--line)" : "none", color: "var(--ink-soft)" }}>
-              <Icon name="check" size={12} color="var(--health)" />
-              <span>{t}</span>
+      </div>
+
+      {/* Autoavaliação de Prontidão da Mudança — Método ORIC */}
+      {fonte.oric && <OricProntidaoCard oric={fonte.oric} />}
+
+      {/* Checklist de documentos e evidências (auditoria) */}
+      {(fonte.checklistDocumentos || []).length > 0 && (
+        <div className="card" style={{ padding: 0, overflow: "hidden", marginTop: 14 }}>
+          <div style={{ padding: "16px 20px", borderBottom: "1px solid var(--line)" }}>
+            <div style={{ fontWeight: 700, fontSize: 14.5, display: "flex", alignItems: "center", gap: 8 }}><Icon name="clipboard" size={14} /> Checklist de documentos e evidências</div>
+            <div style={{ fontSize: 12, color: "var(--ink-muted)", marginTop: 3 }}>O que costuma ser cobrado em auditoria — reúna com o cliente antes de avançar para o Diagnóstico.</div>
+          </div>
+          <div style={{ display: "grid", gridTemplateColumns: "1.3fr 2fr 140px", gap: 12, padding: "8px 20px", fontSize: 10.5, fontWeight: 700, color: "var(--ink-muted)", textTransform: "uppercase", letterSpacing: "0.04em", borderBottom: "1px solid var(--line)" }}>
+            <span>Documento / Evidência</span><span>O que deve ser apresentado / verificado</span><span>Período de referência</span>
+          </div>
+          {fonte.checklistDocumentos.map((doc, i) => (
+            <div key={i} style={{ display: "grid", gridTemplateColumns: "1.3fr 2fr 140px", gap: 12, padding: "12px 20px", alignItems: "center", borderBottom: i < fonte.checklistDocumentos.length - 1 ? "1px solid var(--line)" : "none", fontSize: 12.5 }}>
+              <div style={{ fontWeight: 600 }}>{doc.documento}</div>
+              <div style={{ color: "var(--ink-muted)", fontSize: 12 }}>{doc.verificar}</div>
+              <span className="pill" style={{ background: "var(--canvas-warm)", color: "var(--ink)", fontSize: 11, fontWeight: 600, width: "fit-content" }}>{doc.periodo}</span>
             </div>
           ))}
         </div>
+      )}
+
+      <div style={{ marginTop: 18, display: "flex", justifyContent: "flex-end", gap: 8 }}>
+        {data.status !== "concluida" && (
+          <button onClick={() => onUpdate({ status: "concluida" })} className="btn btn-soft" style={{ height: 38 }}>Marcar etapa como concluída</button>
+        )}
+        <button onClick={onNext} className="btn btn-accent" style={{ height: 38 }}>Avançar para Diagnóstico <Icon name="arrow-right" size={14} /></button>
+      </div>
+    </div>
+  );
+};
+
+// Autoavaliação de Prontidão da Mudança (Método ORIC — Organizational Readiness
+// for Implementing Change), aplicada com a alta gestão do cliente.
+const OricProntidaoCard = ({ oric }) => {
+  const itens = oric.itens || [];
+  const scoreObtido = itens.reduce((s, i) => s + (i.nota || 0), 0);
+  const indiceExigido = oric.indiceExigido || 0;
+  const abaixo = scoreObtido < indiceExigido;
+  const ajuste = Math.max(0, indiceExigido - scoreObtido);
+
+  return (
+    <div className="card" style={{ padding: 0, overflow: "hidden", marginTop: 14 }}>
+      <div style={{ padding: "16px 20px", borderBottom: "1px solid var(--line)" }}>
+        <div style={{ fontWeight: 700, fontSize: 14.5, display: "flex", alignItems: "center", gap: 8 }}><Icon name="pulse" size={14} /> Autoavaliação de Prontidão da Mudança (Método ORIC)</div>
+        <div style={{ fontSize: 12, color: "var(--ink-muted)", marginTop: 3 }}>Atribua nota de 1 (discordo totalmente) a 5 (concordo totalmente) para cada aspecto da organização.</div>
       </div>
 
-      {/* Trilhas disponíveis — grid igual ao Aprendizado */}
-      <div style={{ marginBottom: 10 }}>
-        <h3 className="display" style={{ fontSize: 18, margin: 0 }}>Conteúdos disponíveis</h3>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 90px", gap: 6, padding: "8px 20px", fontSize: 10.5, fontWeight: 700, color: "var(--ink-muted)", textTransform: "uppercase", letterSpacing: "0.04em", borderBottom: "1px solid var(--line)" }}>
+        <span>Enunciado de prontidão (comprometimento &amp; eficácia da mudança)</span><span>Pontuação (1 a 5)</span>
       </div>
+      {itens.map(it => (
+        <div key={it.id} style={{ display: "grid", gridTemplateColumns: "1fr 90px", gap: 6, padding: "10px 20px", alignItems: "center", borderBottom: "1px solid var(--line)", fontSize: 12.5 }}>
+          <div style={{ display: "flex", gap: 8 }}>
+            <span style={{ fontSize: 10.5, fontWeight: 700, color: "var(--ink-muted)", flexShrink: 0 }}>{it.id}</span>
+            <span>{it.enunciado}</span>
+          </div>
+          <span style={{
+            display: "inline-flex", alignItems: "center", justifyContent: "center", width: 30, height: 24, borderRadius: 7,
+            background: "var(--canvas-warm)", color: "var(--ink)", fontWeight: 700, fontSize: 12.5,
+          }}>{it.nota}</span>
+        </div>
+      ))}
 
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(240px, 1fr))", gap: 14 }}>
-        {trilhas.map(t => {
-          const isSel = selectedIds.includes(t.id);
-          return (
-            <button 
-              key={t.id} 
-              onClick={() => setSelectedTrail(t)} 
-              className="card" 
-              style={{ overflow: "hidden", display: "flex", flexDirection: "column", textAlign: "left", padding: 0, border: isSel ? "2px solid var(--health)" : undefined }}
-            >
-              <div style={{ height: 100, background: t.capa, position: "relative" }}>
-                <div style={{ position: "absolute", top: 8, right: 8, padding: "2px 7px", background: "rgba(255,255,255,0.85)", borderRadius: 999, fontSize: 10, fontWeight: 600, color: "var(--ink)" }}>
-                  {t.modulos} módulos
-                </div>
-                {isSel && (
-                  <div style={{ position: "absolute", top: 8, left: 8, background: "var(--health)", color: "#fff", fontSize: 10, padding: "1px 6px", borderRadius: 4 }}>
-                    Selecionado
-                  </div>
-                )}
-              </div>
-              <div style={{ padding: 14 }}>
-                <h3 style={{ fontFamily: "var(--display)", fontWeight: 600, letterSpacing: "-0.02em", fontSize: 16, margin: 0, lineHeight: 1.2 }}>{t.nome}</h3>
-                <div style={{ display: "flex", gap: 10, fontSize: 11, color: "var(--ink-muted)", marginTop: 8 }}>
-                  <span>{t.duracao}</span>
-                  <span>·</span>
-                  <span>{t.inscritos} inscritos</span>
-                </div>
-                <div style={{ marginTop: 10, paddingTop: 10, borderTop: "1px dashed var(--line)", display: "flex", alignItems: "center", gap: 8 }}>
-                  <div style={{ flex: 1, height: 4, background: "var(--canvas-warm)", borderRadius: 99 }}>
-                    <div style={{ width: `${t.conclusao}%`, height: "100%", background: "var(--health)", borderRadius: 99 }} />
-                  </div>
-                  <span style={{ fontSize: 11, color: "var(--ink-muted)" }}>{t.conclusao}%</span>
-                </div>
-                <div style={{ marginTop: 10 }}>
-                  <button 
-                    onClick={(e) => { e.stopPropagation(); toggleSelect(t.id); }} 
-                    className="btn" 
-                    style={{ 
-                      width: "100%", height: 30, fontSize: 12, 
-                      background: isSel ? "#fff" : "var(--health-deep)", 
-                      color: isSel ? "var(--ink)" : "#fff",
-                      border: isSel ? "1px solid var(--line)" : "none"
-                    }}
-                  >
-                    {isSel ? "Remover da seleção" : "Selecionar"}
-                  </button>
-                </div>
-              </div>
-            </button>
-          );
-        })}
-      </div>
-
-      <div style={{ marginTop: 16, display: "flex", alignItems: "center", gap: 12 }}>
-        <button onClick={onNext} className="btn btn-accent" disabled={selectedIds.length < 2} style={{ opacity: selectedIds.length < 2 ? 0.5 : 1 }}>
-          Avançar para Diagnóstico
-        </button>
-        <div style={{ fontSize: 12, color: "var(--ink-muted)" }}>
-          {selectedIds.length} selecionados (mínimo 2)
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 0 }}>
+        <div style={{ padding: "16px 20px", borderRight: "1px solid var(--line)", borderTop: "1px solid var(--line)" }}>
+          <div style={{ fontWeight: 700, fontSize: 13, marginBottom: 10 }}>Cálculo do score de prontidão (ORIC)</div>
+          <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13, padding: "6px 0" }}>
+            <span style={{ color: "var(--ink-muted)" }}>Score de prontidão obtido</span>
+            <span style={{ fontWeight: 700 }}>{scoreObtido}</span>
+          </div>
+          <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13, padding: "6px 0", borderTop: "1px dashed var(--line)" }}>
+            <span style={{ color: "var(--ink-muted)" }}>Índice de prontidão exigido</span>
+            <span style={{ fontWeight: 700 }}>{indiceExigido}</span>
+          </div>
+          <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13, padding: "6px 0", borderTop: "1px dashed var(--line)" }}>
+            <span style={{ color: "var(--ink-muted)" }}>Status de prontidão</span>
+            <span className="pill" style={{ background: abaixo ? "var(--amber-soft)" : "var(--surface-sage)", color: abaixo ? "var(--amber)" : "var(--health-deep)", fontWeight: 700 }}>
+              {abaixo ? `Ajuste recomendado (−${ajuste})` : "Prontidão adequada"}
+            </span>
+          </div>
+        </div>
+        <div style={{ padding: "16px 20px", borderTop: "1px solid var(--line)" }}>
+          <div style={{ fontWeight: 700, fontSize: 13, marginBottom: 10 }}>Recomendação</div>
+          <p style={{ margin: 0, fontSize: 12.5, color: "var(--ink-muted)", lineHeight: 1.5 }}>{oric.recomendacao}</p>
         </div>
       </div>
     </div>
   );
 };
 
-// 5. DIAGNÓSTICO — seleção de instrumentos com preview detalhado
+// 6. DIAGNÓSTICO — seleção de instrumentos com preview detalhado
 const DIAG_INSTRUMENTOS = [
   {
     id: "copsoqii", titulo: "COPSOQ II", tag: "Padrão NR-1",
@@ -2176,12 +2364,12 @@ const DiagnosticoEtapa = ({ data, onUpdate, onNext }) => {
         return (
           <button
             style={{ marginTop: 16 }}
-            onClick={() => onNext(temEntrevista ? 6 : 7)}
+            onClick={() => onNext(temEntrevista ? 7 : 8)}
             className="btn btn-accent"
             disabled={!inst.length}
             title={!inst.length ? "Adicione ao menos um instrumento" : undefined}
           >
-            {temEntrevista ? "Avançar para Entrevistas (Etapa 6) →" : "Avançar para Relatórios (Etapa 7) →"}
+            {temEntrevista ? "Avançar para Entrevistas (Etapa 7) →" : "Avançar para Relatórios (Etapa 8) →"}
           </button>
         );
       })()}
@@ -2361,7 +2549,7 @@ const EntrevistasEtapa = ({ cliente, diagnosticoData, data, onUpdate, onNext, on
   }, [selectedEntrevista]);
 
   // ════════════════════════════════════════════════════════════
-  // ESTADO 1: ETAPA BLOQUEADA (Instrumento não selecionado na Etapa 5)
+  // ESTADO 1: ETAPA BLOQUEADA (Instrumento não selecionado na Etapa 6)
   // ════════════════════════════════════════════════════════════
   if (!isHabilitado) {
     return (
@@ -2380,13 +2568,13 @@ const EntrevistasEtapa = ({ cliente, diagnosticoData, data, onUpdate, onNext, on
         }}>
           <div style={{ maxWidth: 620 }}>
             <div style={{ display: "inline-flex", alignItems: "center", gap: 6, fontSize: 11, fontWeight: 800, textTransform: "uppercase", letterSpacing: "0.08em", color: "var(--accent-cta)", background: "var(--accent-soft)", padding: "4px 10px", borderRadius: 99, marginBottom: 12 }}>
-              <Icon name="lock" size={11} color="var(--accent-cta)" /> Etapa 6 · instrumento bloqueado
+              <Icon name="lock" size={11} color="var(--accent-cta)" /> Etapa 7 · instrumento bloqueado
             </div>
             <h3 style={{ fontSize: 24, fontWeight: 800, color: "var(--ink)", margin: "0 0 8px", letterSpacing: "-0.02em" }}>
               Entrevistas de riscos psicossociais (NR-1)
             </h3>
             <p style={{ fontSize: 14, color: "var(--ink-soft)", lineHeight: 1.6, margin: 0 }}>
-              Esta etapa está desabilitada porque o instrumento <strong>"Entrevista (Sugerida por IA)"</strong> não está selecionado na <strong>Etapa 5 — Diagnóstico</strong> para a empresa <strong>{cliente.name}</strong>.
+              Esta etapa está desabilitada porque o instrumento <strong>"Entrevista (Sugerida por IA)"</strong> não está selecionado na <strong>Etapa 6 — Diagnóstico</strong> para a empresa <strong>{cliente.name}</strong>.
             </p>
             <p style={{ fontSize: 13, color: "var(--ink-muted)", marginTop: 8, lineHeight: 1.5 }}>
               A entrevista qualitativa permite investigar a fundo os 12 fatores psicossociais através de roteiros gerados por IA e classificar a maturidade institucional conforme as diretrizes da NR-1.
@@ -2398,7 +2586,7 @@ const EntrevistasEtapa = ({ cliente, diagnosticoData, data, onUpdate, onNext, on
               </button>
 
               <button onClick={onNext} className="btn btn-ghost" style={{ height: 44, padding: "0 18px", fontSize: 13, border: "1px solid var(--line)", background: "var(--surface)" }}>
-                Pular para Relatórios (Etapa 7) →
+                Pular para Relatórios (Etapa 8) →
               </button>
             </div>
           </div>
@@ -2709,7 +2897,7 @@ const EntrevistasEtapa = ({ cliente, diagnosticoData, data, onUpdate, onNext, on
                 }}
                 className="btn btn-accent"
               >
-                Concluir Etapa 6 e Avançar para Relatórios (Etapa 7) →
+                Concluir Etapa 7 e Avançar para Relatórios (Etapa 8) →
               </button>
             </div>
           </div>
@@ -3076,7 +3264,7 @@ const EntrevistasEtapa = ({ cliente, diagnosticoData, data, onUpdate, onNext, on
             }}
             className="btn btn-accent"
           >
-            Salvar e Avançar para Relatórios (Etapa 7) →
+            Salvar e Avançar para Relatórios (Etapa 8) →
           </button>
         </div>
       </div>
@@ -3259,7 +3447,7 @@ const RelatorioDownloadCard = ({ icon, color, iconBg, titulo, desc, url, staticF
 };
 
 // ════════════════════════════════════════════════════════════
-// NOVOS COMPONENTES VISUAIS — Etapa 6 Dashboard Executivo (puros CSS + SVG)
+// NOVOS COMPONENTES VISUAIS — Etapa 8 (Relatórios) Dashboard Executivo (puros CSS + SVG)
 // ════════════════════════════════════════════════════════════
 const KPICard = ({ icon, label, value, sub, accentColor = "var(--health-deep)", bg = "var(--surface)" }) => (
   <div className="card" style={{ padding: "18px 20px", background: bg, border: "1px solid var(--line)", borderRadius: 14, display: "flex", flexDirection: "column", gap: 6 }}>
@@ -3502,7 +3690,7 @@ const RelatoriosEtapa = ({ cliente, diagnosticoData, data, onUpdate, onNext }) =
     return (
       <div style={{ opacity: 0.6, pointerEvents: "none" }}>
         <div style={{ padding: 20, background: "var(--canvas-warm)", borderRadius: 12, border: "1px dashed var(--line)" }}>
-          <div style={{ fontWeight: 700, marginBottom: 6 }}>Relatórios</div>
+          <div style={{ fontWeight: 700, marginBottom: 6 }}>Resultados</div>
           <div style={{ color: "var(--ink-muted)" }}>Esta aba permanece desabilitada no momento do cadastro. Será liberada automaticamente após a conclusão do Diagnóstico (etapa 5).</div>
         </div>
         <button style={{ marginTop: 16, opacity: 0.5 }} className="btn btn-soft" disabled>Avançar (habilitado após diagnóstico)</button>
@@ -3692,15 +3880,15 @@ const RelatoriosEtapa = ({ cliente, diagnosticoData, data, onUpdate, onNext }) =
         </span>
       ) : (
         <button onClick={() => { onUpdate({ status: "concluida" }); onNext(); }} className="btn btn-accent">
-          <Icon name="arrow-right" size={14} /> Avançar para Apresentação
+          <Icon name="arrow-right" size={14} /> Avançar para Plano de Ação
         </button>
       )}
     </div>
   );
 };
 
-// 7. APRESENTAÇÃO
-const ApresentacaoEtapa = ({ data, onUpdate }) => {
+// 8. PLANO DE ACAO
+const ApresentacaoEtapa = ({ data, onUpdate, cliente, navigate }) => {
   const [dataReuniao, setDataReuniao] = useState(data.data || "");
   const [obs, setObs] = useState(data.obs || "");
   const save = () => onUpdate({ status: "concluida", reuniaoAgendada: true, data: dataReuniao, obs });
@@ -3718,7 +3906,19 @@ const ApresentacaoEtapa = ({ data, onUpdate }) => {
           <textarea value={obs} onChange={e => setObs(e.target.value)} rows={4} style={{ width: "100%", padding: 12, borderRadius: 10, border: "1px solid var(--line)", background: "var(--surface)" }} placeholder="Principais pontos a discutir, responsáveis..." />
         </div>
       </div>
-      <button onClick={save} className="btn btn-accent" style={{ marginTop: 16 }}>Agendar / Concluir Apresentação</button>
+      <div style={{ display: "flex", gap: 10, marginTop: 16, alignItems: "center" }}>
+        <button onClick={save} className="btn btn-accent">Agendar / Concluir Plano de Ação</button>
+        {typeof navigate === "function" && (
+          <button
+            type="button"
+            onClick={() => navigate("plano-acao", { clienteId: cliente?.id })}
+            className="btn btn-soft"
+            style={{ display: "inline-flex", alignItems: "center", gap: 6 }}
+          >
+            <Icon name="tasks" size={14} /> Acessar Plano de Ação
+          </button>
+        )}
+      </div>
       {data.reuniaoAgendada && <div style={{ marginTop: 10, color: "var(--health-deep)" }}>Reunião registrada. Fluxo concluído.</div>}
     </div>
   );

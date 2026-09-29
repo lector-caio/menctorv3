@@ -4,6 +4,10 @@
   "cleanUrls": true,
   "rewrites": [
     {
+      "source": "/api/:path*",
+      "destination": "https://menctor-backend.onrender.com/api/:path*"
+    },
+    {
       "source": "/((?!api/.*|.*\\..*).*)",
       "destination": "/index.html"
     }
