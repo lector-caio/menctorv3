@@ -1,0 +1,18 @@
+# Contexto do backend/Dockerfile (build a partir da raiz do repositório)
+.git
+.gitignore
+.claude
+.history
+.env
+.env.*
+**/__pycache__
+**/*.pyc
+*.py
+api
+python
+requirements.txt
+*.ps1
+*.md
+uploads
+node_modules
+backend/target

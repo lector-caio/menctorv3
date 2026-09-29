@@ -1,0 +1,51 @@
+# Banco de dados do Menctor (PostgreSQL) e, opcionalmente, o backend.
+#
+# Desenvolvimento (só o banco em container):
+#   docker compose up -d db
+#   cd backend && ./mvnw quarkus:dev
+#
+# Tudo em containers (banco + backend servindo frontend e API em http://localhost:5000):
+#   docker compose --profile app up --build
+#
+# Os dados ficam no volume "menctor_pgdata" e sobrevivem a restarts. Em produção, defina
+# DB_PASSWORD (no ambiente ou no .env) em vez de usar a senha padrão de desenvolvimento.
+name: menctor
+
+services:
+  db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: menctor
+      POSTGRES_USER: ${DB_USER:-menctor}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-menctor}
+    ports:
+      - "${DB_PORT:-5432}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d menctor"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+  backend:
+    profiles: ["app"]
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      PORT: 8080
+      DB_URL: jdbc:postgresql://db:5432/menctor
+      DB_USER: ${DB_USER:-menctor}
+      DB_PASSWORD: ${DB_PASSWORD:-menctor}
+    ports:
+      - "5000:8080"
+    depends_on:
+      db:
+        condition: service_healthy
+
+volumes:
+  pgdata:

@@ -1,0 +1,3 @@
+# O backend Quarkus roda em outro host; não faz parte do site estático publicado na Vercel.
+backend
+.dockerignore
